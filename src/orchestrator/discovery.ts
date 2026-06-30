@@ -38,7 +38,7 @@ const DEFAULT_FORMATS_TTL_MS = 5 * 60 * 1000;
 // unresponsive seller does not stall the multi-agent fan-out in planning.
 // Settlement-time calls (getProducts, createMediaBuy) use the brief's
 // time_budget_seconds via planning.ts.
-const CAPABILITIES_PROBE_TIMEOUT_MS = 5000;
+const CAPABILITIES_PROBE_TIMEOUT_MS = 8000;
 
 export class DiscoveryClient {
   private readonly formatsCache: TtlCache<string, Format[]>;
