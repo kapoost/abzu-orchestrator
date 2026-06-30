@@ -421,6 +421,49 @@ async function handle(req: Request): Promise<Response> {
       }
     }
 
+    // Operator-side seller review proxy. The abzu-gui Operator tab reads the
+    // seller's creative review queue + approves/rejects without holding the
+    // seller's Bearer in the browser. Currently single-seller (purrsonality);
+    // generalize to per-seller pathing if/when there's a second reviewable
+    // seller in sellers.json.
+    if (path.startsWith('/seller/creatives')) {
+      const sellerCfg = sellers[0]!;
+      const sellerBase = sellerCfg.agent_uri.replace(/\/mcp\/?$/, '');
+      const sellerAuth = sellerCfg.auth_token;
+      if (!sellerAuth) {
+        return Response.json(
+          { error: 'seller_auth_missing', message: 'configure SELLER_PURRSONALITY_SELLER_AUTH_TOKEN' },
+          { status: 503 },
+        );
+      }
+      const sub = path.slice('/seller/creatives'.length);
+      const target = `${sellerBase}/api/creatives${sub}${url.search}`;
+      try {
+        const fwd = await fetch(target, {
+          method: req.method,
+          headers: {
+            authorization: `Bearer ${sellerAuth}`,
+            ...(req.method !== 'GET' && req.method !== 'HEAD' && req.body
+              ? { 'content-type': req.headers.get('content-type') ?? 'application/json' }
+              : {}),
+          },
+          ...(req.method !== 'GET' && req.method !== 'HEAD' && req.body
+            ? { body: await req.text() }
+            : {}),
+        });
+        const text = await fwd.text();
+        return new Response(text, {
+          status: fwd.status,
+          headers: {
+            'content-type': fwd.headers.get('content-type') ?? 'application/json',
+          },
+        });
+      } catch (err) {
+        log.error('seller proxy failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'seller_unreachable' }, { status: 502 });
+      }
+    }
+
     if (path === '/brands' && req.method === 'GET') {
       const search = (url.searchParams.get('search') ?? '').trim();
       const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '20', 10);
