@@ -1,0 +1,110 @@
+id: orchestrator_agent/seller_impairment
+version: "1.0.0"
+title: "Abzu graceful degradation: one seller impaired, the other carries the brief"
+category: orchestrator_agent
+summary: |
+  Verifies that with two sellers configured in sellers.json — one healthy
+  (purrsonality-seller) and one unreachable (impaired-test-seller, an
+  intentional fixture pointing at a non-existent fly app) — Abzu's
+  multi-seller fan-out continues to surface proposals from the healthy
+  seller, marks the impaired seller as ok=false in diagnostics, and
+  reports partial=false because at least 50% of sellers responded.
+track: orchestrator
+
+narrative: |
+  PLAN B4 (multi-seller fan-out) specifies Promise.allSettled across
+  sellers with a partial_threshold of 0.5: when fewer than half of the
+  configured sellers respond, planning flags partial=true to warn the
+  operator. This storyboard exercises the 1-of-2 case (responded=1,
+  queried=2, ratio=0.5), which is NOT strictly less than 0.5 — so
+  partial=false but per-seller diagnostics surface the failure.
+
+  This is the architectural property under test: a single seller outage
+  (capability check timeout, 401 from a misconfigured auth header, plain
+  network error) MUST NOT block planning. The operator sees both sellers
+  in the registry, sees which one failed and why, and still gets ranked
+  proposals from the healthy seller.
+
+  The impaired seller in sellers.json is impaired-test-seller, pointing
+  at a non-existent fly app (`abzu-impaired-test.fly.dev`). DNS resolves
+  to fly's anycast but no app is registered for that hostname, so the
+  capability probe returns 404 and the planner skips that seller for the
+  brief. The test does not require the impairment cause to be specifically
+  network-error — any validation_failed path satisfies the contract.
+
+agent:
+  interaction_model: orchestrator_agent
+  capabilities:
+    - multi_seller_discovery
+    - partial_failure_resilience
+
+caller:
+  role: operator
+
+prerequisites:
+  description: |
+    sellers.json registers both purrsonality-seller and impaired-test-seller.
+    purrsonality is reachable with SELLER_PURRSONALITY_SELLER_AUTH_TOKEN
+    in env. impaired-test-seller points at a non-existent fly hostname so
+    any capability or get_products call fails. Both must be present in
+    /discovery/agents.
+
+phases:
+  - id: registry
+    title: "Both sellers visible in registry"
+    steps:
+      - id: list_agents
+        title: "GET /discovery/agents returns 2 entries"
+        http_method: GET
+        http_path: /discovery/agents
+        stateful: false
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "agents.length"
+            value: 2
+
+  - id: planning_under_impairment
+    title: "Brief fans out to both sellers; healthy one responds, impaired one does not"
+    steps:
+      - id: planning_brief
+        title: "POST /planning/brief — expect proposals from the healthy seller only"
+        http_method: POST
+        http_path: /planning/brief
+        stateful: true
+        request_body:
+          advertiser:
+            name: "Acme Pet Foods"
+          brief: "Display awareness campaign for grain-free dog food, urban millennials."
+          budget:
+            amount: 5000
+            currency: "USD"
+          flight:
+            start: "2026-07-15"
+            end: "2026-08-15"
+          channels:
+            - "display"
+          top_n: 5
+          time_budget_seconds: 45
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "diagnostics.sellers_queried"
+            value: 2
+          - check: field_value
+            path: "diagnostics.sellers_responded"
+            value: 1
+          - check: field_value
+            path: "diagnostics.partial"
+            value: false
+          - check: field_value_min
+            path: "diagnostics.sellers.length"
+            value: 2
+          - check: field_value_min
+            path: "proposals.length"
+            value: 1
+          - check: field_value
+            path: "proposals[0].seller_id"
+            value: "purrsonality-seller"

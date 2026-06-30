@@ -1,0 +1,26 @@
+# Fly.io deployment for Abzu — AdCP buyer-side orchestrator.
+# Talks to: seller agent(s) via @adcp/sdk + governance agent via ProtocolClient.
+
+app = "abzu-orchestrator"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  GOVERNANCE_AGENT_URI = "https://governance.rocketscience.pl/mcp"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0  # known-plans cache rebuilds on first traffic; cold-start acceptable
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"  # bun + @adcp/sdk + parallel storyboards: OOM at 512mb
+  cpu_kind = "shared"
+  cpus = 1

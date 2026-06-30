@@ -1,0 +1,565 @@
+import { resolve } from 'node:path';
+import { loadEnv } from './env.ts';
+import { log } from './observability/logger.ts';
+import { extractIssues } from './observability/issues.ts';
+import {
+  CreativeError,
+  createOrchestrator,
+  DiscoveryError,
+  ExecutionError,
+} from './orchestrator/index.ts';
+import { loadSellers } from './orchestrator/sellers.ts';
+import { parseBrief } from './strategy/brief.ts';
+import { parseBuyIntake } from './strategy/buy.ts';
+import { parseCreativeSync, parseStatusQuery } from './strategy/creative.ts';
+import { createGovernanceClient, GovernanceError, KnownPlans, type KnownPlansAdapter } from './governance/client.ts';
+import { createPostgresKnownPlans } from './governance/db.ts';
+import { handleMcpRequest, type McpDeps } from './mcp/server.ts';
+import { createOAuthVerifier } from './oauth.ts';
+
+const env = loadEnv();
+
+const sellersPath = resolve(env.SELLERS_CONFIG_PATH);
+const sellers = loadSellers(sellersPath);
+log.info('sellers loaded', { path: sellersPath, count: sellers.length });
+
+const governance = createGovernanceClient(
+  env.GOVERNANCE_AGENT_URI
+    ? {
+        id: 'governance',
+        agent_uri: env.GOVERNANCE_AGENT_URI,
+        protocol: 'mcp',
+        ...(env.GOVERNANCE_AUTH_TOKEN ? { auth_token: env.GOVERNANCE_AUTH_TOKEN } : {}),
+      }
+    : undefined,
+);
+if (governance) {
+  log.info('governance wired', governance.describe());
+} else {
+  log.info('governance not configured (set GOVERNANCE_AGENT_URI to enable)');
+}
+
+const { discovery, planning, creative, execution } = createOrchestrator(
+  sellers,
+  { formatsTtlMs: env.DISCOVERY_FORMATS_TTL_MS },
+  governance,
+);
+
+const knownPlans: KnownPlansAdapter = env.DATABASE_URL
+  ? await createPostgresKnownPlans(env.DATABASE_URL)
+  : new KnownPlans();
+log.info('known_plans store', { backend: env.DATABASE_URL ? 'postgres' : 'in-memory' });
+
+const DISCOVERY_AGENT_RE = /^\/discovery\/agents\/([^/]+)(?:\/(capabilities|formats|publisher-domains))?\/?$/;
+
+const BRANDS_CACHE_TTL_MS = 5 * 60 * 1000;
+const brandsCache = new Map<string, { at: number; data: Array<{ domain: string; name: string }> }>();
+
+function publicSellerView(s: ReturnType<typeof discovery.listAgents>[number]) {
+  return {
+    id: s.id,
+    name: s.name,
+    agent_uri: s.agent_uri,
+    protocol: s.protocol,
+    tags: s.tags,
+  };
+}
+
+function notFound() {
+  return new Response('not found', { status: 404 });
+}
+
+function mapDiscoveryError(err: DiscoveryError, agentId: string): Response {
+  log.warn('discovery error', { agentId, code: err.code, message: err.message });
+  if (err.code === 'agent_not_found') {
+    return Response.json({ error: err.message, code: err.code }, { status: 404 });
+  }
+  return Response.json({ error: err.message, code: err.code }, { status: 502 });
+}
+
+function mapCreativeError(err: CreativeError, agentId: string): Response {
+  log.warn('creative error', { agentId, code: err.code, message: err.message });
+  if (err.code === 'agent_not_found') {
+    return Response.json({ error: err.message, code: err.code }, { status: 404 });
+  }
+  return Response.json({ error: err.message, code: err.code }, { status: 502 });
+}
+
+function mapGovernanceError(err: GovernanceError): Response {
+  log.warn('governance error', { code: err.code, message: err.message });
+  if (err.code === 'not_configured') {
+    return Response.json({ error: err.message, code: err.code }, { status: 503 });
+  }
+  return Response.json({ error: err.message, code: err.code }, { status: 502 });
+}
+
+function requireGovernance() {
+  if (!governance) {
+    return Response.json(
+      {
+        error: 'governance not configured (set GOVERNANCE_AGENT_URI)',
+        code: 'not_configured',
+      },
+      { status: 503 },
+    );
+  }
+  return null;
+}
+
+function mapExecutionError(err: ExecutionError): Response {
+  log.warn('execution error', { code: err.code, message: err.message, detail: err.detail });
+  if (err.code === 'agent_not_found') {
+    return Response.json({ error: err.message, code: err.code, detail: err.detail }, { status: 404 });
+  }
+  if (err.code === 'governance_denied' || err.code === 'conditions_not_accepted') {
+    return Response.json({ error: err.message, code: err.code, detail: err.detail }, { status: 409 });
+  }
+  return Response.json({ error: err.message, code: err.code, detail: err.detail }, { status: 502 });
+}
+
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization',
+  'access-control-max-age': '600',
+};
+
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+const mcpDeps: McpDeps = {
+  discovery,
+  planning,
+  creative,
+  ...(execution ? { execution } : {}),
+  ...(governance ? { governance } : {}),
+  knownPlans,
+  version: env.VERSION,
+};
+const verifyJwt = createOAuthVerifier({
+  issuer: env.OAUTH_ISSUER,
+  jwks_uri: env.OAUTH_JWKS_URI,
+  audience: env.OAUTH_AUDIENCE,
+});
+
+async function verifyAuth(header: string | null): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  if (!header || !header.startsWith('Bearer ')) {
+    return { ok: false, status: 401, error: 'Missing bearer token.' };
+  }
+  const token = header.substring('Bearer '.length).trim();
+  // Static fallback: identical to the value in ABZU_ORCHESTRATOR_AUTH_TOKEN.
+  // Matches first to short-circuit JWKS lookups for AAO's hot path.
+  if (env.ABZU_ORCHESTRATOR_AUTH_TOKEN && token === env.ABZU_ORCHESTRATOR_AUTH_TOKEN) {
+    return { ok: true };
+  }
+  // JWT path — JWKS-verified, audience-checked, issuer-checked.
+  const verified = await verifyJwt(header);
+  if ('error' in verified) {
+    return { ok: false, status: verified.status, error: verified.error };
+  }
+  return { ok: true };
+}
+
+log.info('mcp wired', {
+  path: '/mcp',
+  auth_modes: [
+    'rs256_jwt',
+    ...(env.ABZU_ORCHESTRATOR_AUTH_TOKEN ? ['static_bearer'] : []),
+  ],
+  issuer: env.OAUTH_ISSUER,
+  audience: env.OAUTH_AUDIENCE,
+});
+
+const server = Bun.serve({
+  port: env.PORT,
+  hostname: env.HOST,
+  idleTimeout: 60,
+  async fetch(req) {
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    const url = new URL(req.url);
+    if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
+      const verified = await verifyAuth(req.headers.get('authorization'));
+      if (!verified.ok) {
+        return withCors(
+          Response.json(
+            { error: 'invalid_token', error_description: verified.error },
+            { status: verified.status },
+          ),
+        );
+      }
+      const mcpResponse = await handleMcpRequest(req, mcpDeps);
+      return withCors(mcpResponse);
+    }
+    const response = await handle(req);
+    return withCors(response);
+  },
+});
+
+async function handle(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const path = url.pathname;
+
+    if (path === '/healthz') {
+      return Response.json({ status: 'ok', agent: 'abzu', version: env.VERSION });
+    }
+    if (path === '/') {
+      return Response.json({
+        agent: 'abzu',
+        role: 'orchestrator',
+        version: env.VERSION,
+        adcp_sdk: '9.0.0',
+        sellers: sellers.length,
+      });
+    }
+    if (path === '/discovery/agents') {
+      return Response.json({ agents: discovery.listAgents().map(publicSellerView) });
+    }
+
+    if (path === '/execution/buy' && req.method === 'POST') {
+      if (!execution) {
+        return Response.json(
+          { error: 'execution requires governance (set GOVERNANCE_AGENT_URI)', code: 'governance_required' },
+          { status: 503 },
+        );
+      }
+      let payload: unknown;
+      try { payload = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      let intake;
+      try {
+        intake = parseBuyIntake(payload);
+      } catch (err) {
+        return Response.json(
+          { error: 'invalid_buy', code: 'validation_failed', issues: extractIssues(err) },
+          { status: 400 },
+        );
+      }
+      try {
+        const result = await execution.executeBuy(intake);
+        await knownPlans.remember(intake.plan_id, intake.brand.domain);
+        return Response.json(result);
+      } catch (err) {
+        if (err instanceof ExecutionError) return mapExecutionError(err);
+        log.error('execution failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'execution_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/execution/delivery' && req.method === 'POST') {
+      if (!execution) {
+        return Response.json(
+          { error: 'execution requires governance (set GOVERNANCE_AGENT_URI)', code: 'governance_required' },
+          { status: 503 },
+        );
+      }
+      let payload: unknown;
+      try { payload = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      const body = payload as { seller_id?: unknown; media_buy_id?: unknown; plan_id?: unknown; governance_context?: unknown };
+      if (
+        typeof body.seller_id !== 'string' ||
+        typeof body.media_buy_id !== 'string' ||
+        typeof body.plan_id !== 'string' ||
+        typeof body.governance_context !== 'string'
+      ) {
+        return Response.json(
+          { error: 'missing or invalid fields (need seller_id, media_buy_id, plan_id, governance_context)' },
+          { status: 400 },
+        );
+      }
+      try {
+        const out = await execution.pullDelivery({
+          seller_id: body.seller_id,
+          media_buy_id: body.media_buy_id,
+          plan_id: body.plan_id,
+          governance_context: body.governance_context,
+        });
+        return Response.json(out);
+      } catch (err) {
+        if (err instanceof ExecutionError) return mapExecutionError(err);
+        log.error('delivery pull failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'delivery_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/governance/plans' && req.method === 'GET') {
+      const blocked = requireGovernance();
+      if (blocked) return blocked;
+      return Response.json({ plans: await knownPlans.list() });
+    }
+
+    if (path === '/governance/plans' && req.method === 'POST') {
+      const blocked = requireGovernance();
+      if (blocked) return blocked;
+      let payload: unknown;
+      try { payload = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      const plans = (payload as { plans?: unknown[] })?.plans;
+      if (!Array.isArray(plans) || plans.length === 0) {
+        return Response.json({ error: 'missing or empty plans[]' }, { status: 400 });
+      }
+      try {
+        const out = await governance!.syncPlans(plans as never);
+        for (const p of plans as Array<{ plan_id?: string; brand?: { domain?: string } }>) {
+          if (p?.plan_id) await knownPlans.remember(p.plan_id, p.brand?.domain);
+        }
+        return Response.json(out);
+      } catch (err) {
+        if (err instanceof GovernanceError) return mapGovernanceError(err);
+        log.error('governance syncPlans failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'sync_plans_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/governance/check' && req.method === 'POST') {
+      const blocked = requireGovernance();
+      if (blocked) return blocked;
+      let payload: unknown;
+      try { payload = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      try {
+        const out = await governance!.checkGovernance(payload as never);
+        return Response.json(out);
+      } catch (err) {
+        if (err instanceof GovernanceError) return mapGovernanceError(err);
+        log.error('governance check failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'check_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/governance/outcome' && req.method === 'POST') {
+      const blocked = requireGovernance();
+      if (blocked) return blocked;
+      let payload: unknown;
+      try { payload = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      try {
+        const out = await governance!.reportOutcome(payload as never);
+        return Response.json(out);
+      } catch (err) {
+        if (err instanceof GovernanceError) return mapGovernanceError(err);
+        log.error('governance outcome failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'outcome_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/governance/audit' && req.method === 'GET') {
+      const blocked = requireGovernance();
+      if (blocked) return blocked;
+      const planIds = url.searchParams.get('plan_ids');
+      const includeEntries = url.searchParams.get('include_entries') === 'true';
+      if (!planIds) {
+        return Response.json({ error: 'plan_ids query param required' }, { status: 400 });
+      }
+      try {
+        const out = await governance!.getAuditLogs({
+          plan_ids: planIds.split(',').filter(Boolean),
+          ...(includeEntries ? { include_entries: true } : {}),
+        });
+        return Response.json(out);
+      } catch (err) {
+        if (err instanceof GovernanceError) return mapGovernanceError(err);
+        log.error('governance audit failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'audit_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/creatives/sync' && req.method === 'POST') {
+      let payload: unknown;
+      try {
+        payload = await req.json();
+      } catch {
+        return Response.json({ error: 'invalid_json' }, { status: 400 });
+      }
+      let input;
+      try {
+        input = parseCreativeSync(payload);
+      } catch (err) {
+        return Response.json(
+          { error: 'invalid_payload', code: 'validation_failed', issues: extractIssues(err) },
+          { status: 400 },
+        );
+      }
+      try {
+        const outcome = await creative.sync(input);
+        return Response.json(outcome);
+      } catch (err) {
+        if (err instanceof CreativeError) return mapCreativeError(err, input.seller_id);
+        log.error('creative sync failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'sync_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/creatives/status' && req.method === 'GET') {
+      const sellerId = url.searchParams.get('seller_id') ?? '';
+      const creativeIds = url.searchParams.get('creative_ids');
+      const statuses = url.searchParams.get('statuses');
+      let query;
+      try {
+        query = parseStatusQuery({
+          seller_id: sellerId,
+          creative_ids: creativeIds ? creativeIds.split(',').filter(Boolean) : [],
+          statuses: statuses ? statuses.split(',').filter(Boolean) : [],
+        });
+      } catch (err) {
+        return Response.json(
+          { error: 'invalid_query', code: 'validation_failed', issues: extractIssues(err) },
+          { status: 400 },
+        );
+      }
+      try {
+        const outcome = await creative.status(query);
+        return Response.json(outcome);
+      } catch (err) {
+        if (err instanceof CreativeError) return mapCreativeError(err, query.seller_id);
+        log.error('creative status failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'status_failed' }, { status: 500 });
+      }
+    }
+
+    if (path === '/brands' && req.method === 'GET') {
+      const search = (url.searchParams.get('search') ?? '').trim();
+      const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '20', 10);
+      const limit = Math.min(50, Math.max(1, Number.isNaN(limitRaw) ? 20 : limitRaw));
+      if (!env.AAO_BEARER_TOKEN) {
+        return Response.json(
+          { error: 'aao_unconfigured', message: 'AAO_BEARER_TOKEN not set' },
+          { status: 503 },
+        );
+      }
+      const cacheKey = `${search}::${limit}`;
+      const cached = brandsCache.get(cacheKey);
+      const now = Date.now();
+      if (cached && now - cached.at < BRANDS_CACHE_TTL_MS) {
+        return Response.json({ brands: cached.data, cached: true });
+      }
+      try {
+        const aaoRes = await fetch('https://agenticadvertising.org/mcp', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            authorization: `Bearer ${env.AAO_BEARER_TOKEN}`,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'list_brands',
+              arguments: { limit, ...(search ? { search } : {}) },
+            },
+          }),
+        });
+        if (!aaoRes.ok) {
+          log.warn('aao brands proxy http error', { status: aaoRes.status });
+          return Response.json({ error: 'aao_error', status: aaoRes.status }, { status: 502 });
+        }
+        const json = (await aaoRes.json()) as {
+          result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+          error?: unknown;
+        };
+        if (json.error) {
+          log.warn('aao brands proxy mcp error', { err: JSON.stringify(json.error) });
+          return Response.json({ error: 'aao_error', detail: json.error }, { status: 502 });
+        }
+        let brandsRaw: unknown = [];
+        const structured = json.result?.structuredContent as { brands?: unknown[] } | undefined;
+        if (structured?.brands && Array.isArray(structured.brands)) {
+          brandsRaw = structured.brands;
+        } else if (Array.isArray(json.result?.content)) {
+          const textBlock = json.result.content.find((c) => c?.type === 'text')?.text;
+          if (textBlock) {
+            try {
+              const parsed = JSON.parse(textBlock) as { brands?: unknown[] } | unknown[];
+              brandsRaw = Array.isArray(parsed) ? parsed : (parsed?.brands ?? []);
+            } catch {
+              brandsRaw = [];
+            }
+          }
+        }
+        const brands = Array.isArray(brandsRaw)
+          ? brandsRaw
+              .map((b) => {
+                const obj = b as { domain?: string; brand_name?: string; name?: string };
+                return { domain: obj.domain ?? '', name: obj.brand_name ?? obj.name ?? obj.domain ?? '' };
+              })
+              .filter((b) => b.domain.length > 0)
+          : [];
+        brandsCache.set(cacheKey, { at: now, data: brands });
+        return Response.json({ brands });
+      } catch (err) {
+        log.error('aao brands proxy exception', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+        return Response.json({ error: 'aao_unreachable' }, { status: 502 });
+      }
+    }
+
+    if (path === '/planning/brief' && req.method === 'POST') {
+      let payload: unknown;
+      try {
+        payload = await req.json();
+      } catch {
+        return Response.json({ error: 'invalid_json' }, { status: 400 });
+      }
+      let brief;
+      try {
+        brief = parseBrief(payload);
+      } catch (err) {
+        return Response.json(
+          { error: 'invalid_brief', code: 'validation_failed', issues: extractIssues(err) },
+          { status: 400 },
+        );
+      }
+      try {
+        const plan = await planning.planFromBrief(brief);
+        return Response.json(plan);
+      } catch (err) {
+        log.error('planning failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'planning_failed' }, { status: 500 });
+      }
+    }
+
+    const match = DISCOVERY_AGENT_RE.exec(path);
+    if (match) {
+      const [, rawAgentId, action] = match;
+      const agentId = decodeURIComponent(rawAgentId!);
+      try {
+        if (!action) {
+          if (!discovery.hasAgent(agentId)) {
+            return Response.json({ error: `unknown agent: ${agentId}`, code: 'agent_not_found' }, { status: 404 });
+          }
+          const agent = discovery.listAgents().find((s) => s.id === agentId)!;
+          return Response.json({ agent: publicSellerView(agent) });
+        }
+        if (action === 'capabilities') {
+          const caps = await discovery.getCapabilities(agentId);
+          return Response.json(caps);
+        }
+        if (action === 'formats') {
+          const formats = await discovery.getCreativeFormats(agentId);
+          return Response.json({ count: formats.length, formats });
+        }
+        if (action === 'publisher-domains') {
+          const domains = await discovery.getPublisherDomains(agentId);
+          return Response.json({ count: domains.length, publisher_domains: domains });
+        }
+      } catch (err) {
+        if (err instanceof DiscoveryError) return mapDiscoveryError(err, agentId);
+        log.error('unexpected discovery failure', {
+          agentId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        return Response.json({ error: 'internal error' }, { status: 500 });
+      }
+    }
+
+    return notFound();
+}
+
+log.info('abzu listening', { url: `http://${server.hostname}:${server.port}` });

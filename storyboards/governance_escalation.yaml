@@ -1,0 +1,214 @@
+id: orchestrator_agent/governance_escalation
+version: "1.0.0"
+title: "Abzu conditions verdict: human escalation required, operator accepts, buy proceeds"
+category: orchestrator_agent
+summary: |
+  Verifies the conditions verdict path: a buy that exceeds the plan's
+  reallocation_threshold (but stays within the plan total) produces a
+  warning finding and verdict=conditions. Without accept_conditions=true,
+  Abzu returns HTTP 409 conditions_not_accepted (no seller hit). When the
+  operator resubmits with accept_conditions=true acknowledging the
+  human-escalation surface, the buy proceeds and the audit ledger records
+  both attempts.
+track: orchestrator
+
+narrative: |
+  Per AdCP 3.x governance, verdict=conditions means the action MAY proceed
+  but the policy engine flagged a condition that warrants human review.
+  In our budget policy this fires when total_budget exceeds
+  reallocation_threshold (but does not breach the absolute plan cap).
+
+  PLAN B1.3 declines to auto-apply conditions in MVP: the orchestrator
+  surfaces them to the operator (HTTP 409 with detail.conditions[]) and
+  requires accept_conditions=true on the resubmit to acknowledge that a
+  human reviewer has accepted the escalation. Audit captures both checks
+  so reviewers can trace what was flagged and how it was resolved.
+
+  The auto-apply branch (where Abzu rewrites the request to satisfy the
+  machine-actionable condition.required_value and re-checks before
+  proceeding) is a planned iter 2 enhancement and out of MVP scope.
+
+agent:
+  interaction_model: orchestrator_agent
+  capabilities:
+    - governance_gated_buy
+    - conditions_acknowledgement
+    - audit_trail
+
+caller:
+  role: operator
+
+prerequisites:
+  description: |
+    Abzu + governance up. Governance in enforce mode (advisory behaves
+    similarly here; audit would force approved verdict and skip the
+    conditions branch entirely).
+
+phases:
+  - id: plan_setup
+    title: "Plan with reallocation_threshold=5000, total=10000"
+    steps:
+      - id: sync_plan
+        title: "Sync plan that distinguishes warning threshold from hard cap"
+        http_method: POST
+        http_path: /governance/plans
+        stateful: true
+        request_body:
+          plans:
+            - plan_id: "$context.plan_id"
+              brand:
+                domain: "acme.example.com"
+              objectives: "Escalation storyboard plan."
+              budget:
+                total: 10000
+                currency: "USD"
+                reallocation_threshold: 5000
+              flight:
+                start: "2026-07-15T00:00:00Z"
+                end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "plans[0].status"
+            value: "active"
+
+  - id: discovery
+    title: "Brief intake"
+    steps:
+      - id: planning_brief
+        title: "Capture seller_id, product_id, pricing_option_id"
+        http_method: POST
+        http_path: /planning/brief
+        stateful: true
+        request_body:
+          advertiser:
+            name: "Acme Pet Foods"
+          brief: "Display awareness campaign for grain-free dog food, urban millennials."
+          budget:
+            amount: 5000
+            currency: "USD"
+          flight:
+            start: "2026-07-15"
+            end: "2026-08-15"
+          channels:
+            - "display"
+          top_n: 3
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "proposals.length"
+            value: 1
+        captures:
+          - name: seller_id
+            from: "proposals[0].seller_id"
+          - name: product_id
+            from: "proposals[0].product.product_id"
+          - name: pricing_option_id
+            from: "proposals[0].product.pricing_options[0].pricing_option_id"
+
+  - id: conditions_blocked
+    title: "Buy 7000 USD (above threshold) → conditions, blocked without acknowledgement"
+    steps:
+      - id: buy_without_acknowledgement
+        title: "Budget exceeds reallocation_threshold; expect 409 conditions_not_accepted"
+        http_method: POST
+        http_path: /execution/buy
+        stateful: true
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 7000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 409
+          - check: error_code
+            allowed_values:
+              - "conditions_not_accepted"
+          - check: field_present
+            path: "detail.check_id"
+          - check: field_value_min
+            path: "detail.conditions.length"
+            value: 1
+          - check: not_field_present
+            path: "media_buy"
+
+  - id: conditions_accepted
+    title: "Operator resubmits with accept_conditions=true; buy proceeds"
+    steps:
+      - id: buy_with_acknowledgement
+        title: "Same payload + accept_conditions=true → verdict=conditions but execution continues"
+        http_method: POST
+        http_path: /execution/buy
+        stateful: true
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 7000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+          accept_conditions: true
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "governance_check.verdict"
+            value: "conditions"
+          - check: field_value_min
+            path: "governance_check.conditions.length"
+            value: 1
+          - check: field_present
+            path: "governance_check.expires_at"
+          - check: field_present
+            path: "media_buy.media_buy_id"
+          - check: field_value
+            path: "outcome.outcome_state"
+            value: "accepted"
+          - check: field_value
+            path: "outcome.committed_budget"
+            value: 7000
+
+  - id: audit
+    title: "Audit ledger captures both conditions checks plus the accepted outcome"
+    steps:
+      - id: audit_query
+        http_method: GET
+        http_path: "/governance/audit?plan_ids=$context.plan_id&include_entries=true"
+        stateful: false
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "plans[0].summary.checks_performed"
+            value: 2
+          - check: field_value_min
+            path: "plans[0].summary.outcomes_reported"
+            value: 1
+          - check: field_value_min
+            path: "plans[0].entries.length"
+            value: 3

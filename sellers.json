@@ -1,0 +1,136 @@
+{
+  "sellers": [
+    {
+      "id": "purrsonality-seller",
+      "name": "Purrsonality Seller",
+      "agent_uri": "https://seller.purrsonality.rocketscience.pl/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["PL"],
+        "categories": ["sales-non-guaranteed", "pets"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "impaired-test-seller",
+      "name": "Impaired test seller (intentional fixture)",
+      "agent_uri": "https://abzu-impaired-test.fly.dev/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["XX"],
+        "categories": ["fixture", "impaired"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "gumgum-sales-agent",
+      "name": "GumGum Sales Agent",
+      "agent_uri": "https://agent.gumgum.com/adcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["US", "GB"],
+        "categories": ["sales-non-guaranteed", "display", "video", "ctv"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "loopme-sales-agent",
+      "name": "LoopMe Sales Agent",
+      "agent_uri": "https://platform.loopme.ai/mcp/seller",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["US", "GB"],
+        "categories": ["sales-non-guaranteed", "brand", "performance", "mobile"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "bidmachine-seller-agent",
+      "name": "BidMachine Seller Agent",
+      "agent_uri": "https://adcp.bidmachine.io/adcp/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["US"],
+        "categories": ["sales-non-guaranteed", "mobile", "in-app", "sdk"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "equativ",
+      "name": "Equativ",
+      "agent_uri": "https://adcp.equativ.com/v1/discover",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["FR", "US", "GB"],
+        "categories": ["sales-non-guaranteed", "ssp", "ctv", "video"],
+        "languages": ["en", "fr"]
+      }
+    },
+    {
+      "id": "inmobi-exchange",
+      "name": "InMobi Exchange",
+      "agent_uri": "https://adcp-nonprod.exchange.inmobi.com/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["IN", "US"],
+        "categories": ["sales-non-guaranteed", "mobile", "exchange"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "triton-digital",
+      "name": "Triton Digital Sales Agent (Staging)",
+      "agent_uri": "https://adcp-salesagent.api.staging.tritondigital.com/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["US", "CA"],
+        "categories": ["sales-non-guaranteed", "audio", "podcast", "radio"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "weather-company-scope3",
+      "name": "The Weather Company (Scope3)",
+      "agent_uri": "https://weather.sales-agent.scope3.com/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["US"],
+        "categories": ["sales-non-guaranteed", "weather", "news"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "ozone-project",
+      "name": "Ozone Project",
+      "agent_uri": "https://adcp.ozpr.cloud/v3/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["GB"],
+        "categories": ["sales-non-guaranteed", "news", "premium"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "adzymic-sph",
+      "name": "Adzymic — Straits Times (SPH)",
+      "agent_uri": "https://sph.sales-agent.adzymic.ai/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["SG"],
+        "categories": ["sales-non-guaranteed", "news", "ctv", "display"],
+        "languages": ["en"]
+      }
+    },
+    {
+      "id": "mamamia",
+      "name": "Mamamia Sales Agent",
+      "agent_uri": "https://agent.mamamia.com.au/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "countries": ["AU"],
+        "categories": ["sales-non-guaranteed", "lifestyle", "women"],
+        "languages": ["en"]
+      }
+    }
+  ]
+}

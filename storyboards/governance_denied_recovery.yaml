@@ -1,0 +1,211 @@
+id: orchestrator_agent/governance_denied_recovery
+version: "1.0.0"
+title: "Abzu denial recovery: over-budget request is blocked at the gate; retry within authority succeeds"
+category: orchestrator_agent
+summary: |
+  Verifies that an over-budget intent is rejected by check_governance with
+  HTTP 409 governance_denied (no seller hit, no media_buy_id issued), and
+  that an operator-mediated retry within plan authority succeeds end-to-end.
+  Both attempts surface on the audit ledger.
+track: orchestrator
+
+narrative: |
+  Per AdCP 3.x, when governance denies an intent check the buyer's
+  orchestrator MUST NOT proceed to the seller. PLAN B1.3 closes this gate
+  in Abzu's ExecutionClient: a verdict=denied with mode!=audit returns
+  HTTP 409 to the caller before create_media_buy is dispatched.
+
+  Recovery in MVP is operator-mediated rather than automatic. PLAN B5.1 #2
+  ("Abzu redukuje i retryuje") foresees Abzu auto-shrinking the request
+  and re-checking; the MVP path is for the operator (Sam) to resubmit with
+  an adjusted budget. The audit ledger captures both attempts so reviewers
+  see the denied call alongside the approved retry.
+
+  The auto-shrink behavior is tracked separately and will eventually
+  replace the operator-resubmit step here; this storyboard validates that
+  the gate fires correctly and that a corrected retry clears it.
+
+agent:
+  interaction_model: orchestrator_agent
+  capabilities:
+    - governance_gated_buy
+    - audit_trail
+
+caller:
+  role: operator
+  example: "Campaign operator (Sam persona); retries after seeing the gate fire"
+
+prerequisites:
+  description: |
+    A running Abzu instance with GOVERNANCE_AGENT_URI configured. Governance
+    in enforce mode so denials produce HTTP 409 (audit mode would force
+    approved verdict and skip the gate semantics).
+
+phases:
+  - id: plan_setup
+    title: "Register a governance plan"
+    steps:
+      - id: sync_plan
+        title: "Sync plan with total_budget=10000, reallocation_threshold=5000"
+        http_method: POST
+        http_path: /governance/plans
+        stateful: true
+        request_body:
+          plans:
+            - plan_id: "$context.plan_id"
+              brand:
+                domain: "acme.example.com"
+              objectives: "Awareness for grain-free dog food (denied-recovery storyboard)."
+              budget:
+                total: 10000
+                currency: "USD"
+                reallocation_threshold: 5000
+              flight:
+                start: "2026-07-15T00:00:00Z"
+                end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "plans[0].status"
+            value: "active"
+
+  - id: discovery
+    title: "Brief intake"
+    steps:
+      - id: planning_brief
+        title: "Pick a product to bid against"
+        http_method: POST
+        http_path: /planning/brief
+        stateful: true
+        request_body:
+          advertiser:
+            name: "Acme Pet Foods"
+          brief: "Display awareness campaign for grain-free dog food, urban millennials."
+          budget:
+            amount: 5000
+            currency: "USD"
+          flight:
+            start: "2026-07-15"
+            end: "2026-08-15"
+          channels:
+            - "display"
+          top_n: 3
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "proposals.length"
+            value: 1
+        captures:
+          - name: seller_id
+            from: "proposals[0].seller_id"
+          - name: product_id
+            from: "proposals[0].product.product_id"
+          - name: pricing_option_id
+            from: "proposals[0].product.pricing_options[0].pricing_option_id"
+
+  - id: denied
+    title: "Over-budget buy is blocked at the governance gate"
+    steps:
+      - id: buy_over_budget
+        title: "Buy budget 25000 > plan total 10000 → expect HTTP 409 governance_denied"
+        http_method: POST
+        http_path: /execution/buy
+        stateful: true
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 25000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 409
+          - check: error_code
+            allowed_values:
+              - "governance_denied"
+          - check: field_present
+            path: "detail.check_id"
+          - check: field_value_min
+            path: "detail.findings.length"
+            value: 1
+          - check: field_value
+            path: "detail.mode"
+            value: "enforce"
+          - check: not_field_present
+            path: "media_buy"
+          - check: not_field_present
+            path: "media_buy_id"
+
+  - id: recovery
+    title: "Retry within authority succeeds"
+    steps:
+      - id: buy_within_budget
+        title: "Operator resubmits with budget 3000; expect approved + committed buy"
+        http_method: POST
+        http_path: /execution/buy
+        stateful: true
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 3000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "governance_check.verdict"
+            value: "approved"
+          - check: field_present
+            path: "media_buy.media_buy_id"
+          - check: field_value
+            path: "outcome.outcome_state"
+            value: "accepted"
+          - check: field_value
+            path: "outcome.committed_budget"
+            value: 3000
+
+  - id: audit
+    title: "Audit log surfaces both attempts"
+    steps:
+      - id: audit_query
+        title: "Both the denied check and the approved check are in the ledger"
+        http_method: GET
+        http_path: "/governance/audit?plan_ids=$context.plan_id&include_entries=true"
+        stateful: false
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "plans[0].summary.checks_performed"
+            value: 2
+          - check: field_value_min
+            path: "plans[0].summary.outcomes_reported"
+            value: 1
+          - check: field_value_min
+            path: "plans[0].entries.length"
+            value: 3

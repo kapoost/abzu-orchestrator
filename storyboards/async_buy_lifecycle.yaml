@@ -1,0 +1,149 @@
+id: orchestrator_agent/async_buy_lifecycle
+version: "1.0.0"
+title: "Abzu async lifecycle: seller returns submitted, Abzu polls to completion"
+category: orchestrator_agent
+skip_live: true
+summary: |
+  Verifies that when a seller returns the AdCP `submitted` arm on
+  create_media_buy (long-running work — IO signing, HITL approval, batch
+  ingestion), Abzu's ExecutionClient invokes the SDK's waitForCompletion
+  polling helper, transparently awaits the terminal status, and proceeds
+  with the post-buy outcome report. The operator-facing /execution/buy
+  response carries `media_buy.awaited_submitted: true` to surface that the
+  call traversed the async branch.
+track: orchestrator
+
+narrative: |
+  AdCP 3.x defines a submitted task envelope for tools whose work cannot
+  resolve inside the protocol call. The SDK's TaskResult union exposes a
+  `submitted` continuation with waitForCompletion(pollInterval, signal).
+  Abzu's contract: if the seller returns submitted on create_media_buy,
+  Abzu polls every 5 seconds for up to 60 seconds before reporting the
+  outcome. If the work does not complete in the budget, Abzu throws
+  task_pending so the operator can retry via the task_id.
+
+  This storyboard is NOT runnable against purrsonality-seller in dev mode
+  (synchronous-only). Live execution requires:
+    - A seller that honors compliance_testing scenarios and routes
+      create_media_buy through the submitted arm via comply_test_controller,
+      or
+    - A custom seller fixture/mock that emits a SubmittedContinuation.
+
+  Coverage in MVP is provided by `tests/execution-async.test.ts` which
+  mocks the multi-agent client to deliver submitted → waitForCompletion →
+  completed and validates the awaited_submitted flag, task_id propagation,
+  and timeout-driven task_pending escalation.
+
+  This YAML preserves the storyboard's structural contract for the day a
+  conforming async seller is in the fleet. When that lands, drop the
+  notes_*/skipped markers and run with the standard storyboard CLI.
+
+agent:
+  interaction_model: orchestrator_agent
+  capabilities:
+    - governance_gated_buy
+    - async_lifecycle_handling
+
+caller:
+  role: operator
+
+prerequisites:
+  description: |
+    Live: Abzu + governance + a seller that returns submitted on
+    create_media_buy (requires either compliance_testing scenario routing
+    or a custom mock). Without that, this storyboard is documented-only
+    and validated via unit tests in tests/execution-async.test.ts.
+  notes_runnability: "skipped_live; covered_by_unit_tests"
+
+phases:
+  - id: plan_setup
+    title: "Register governance plan"
+    steps:
+      - id: sync_plan
+        http_method: POST
+        http_path: /governance/plans
+        request_body:
+          plans:
+            - plan_id: "$context.plan_id"
+              brand:
+                domain: "acme.example.com"
+              objectives: "Async lifecycle storyboard plan."
+              budget:
+                total: 10000
+                currency: "USD"
+                reallocation_threshold: 5000
+              flight:
+                start: "2026-07-15T00:00:00Z"
+                end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+
+  - id: discovery
+    title: "Brief intake"
+    steps:
+      - id: planning_brief
+        http_method: POST
+        http_path: /planning/brief
+        request_body:
+          advertiser:
+            name: "Acme Pet Foods"
+          brief: "Display awareness campaign for async lifecycle storyboard."
+          budget:
+            amount: 5000
+            currency: "USD"
+          flight:
+            start: "2026-07-15"
+            end: "2026-08-15"
+          channels:
+            - "display"
+          top_n: 3
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "proposals.length"
+            value: 1
+        captures:
+          - name: seller_id
+            from: "proposals[0].seller_id"
+          - name: product_id
+            from: "proposals[0].product.product_id"
+          - name: pricing_option_id
+            from: "proposals[0].product.pricing_options[0].pricing_option_id"
+
+  - id: async_buy
+    title: "Buy traverses the submitted arm; Abzu polls to completion"
+    steps:
+      - id: buy_async
+        title: "Seller returns submitted; Abzu awaits and reports outcome on completion"
+        http_method: POST
+        http_path: /execution/buy
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 3000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "media_buy.awaited_submitted"
+            value: true
+          - check: field_present
+            path: "media_buy.media_buy_id"
+          - check: field_value
+            path: "outcome.outcome_state"
+            value: "accepted"

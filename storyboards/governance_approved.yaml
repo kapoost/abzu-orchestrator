@@ -1,0 +1,214 @@
+id: orchestrator_agent/governance_approved
+version: "1.0.0"
+title: "Abzu happy-path: brief → plan → check → buy → outcome → audit"
+category: orchestrator_agent
+summary: |
+  Verifies that Abzu (buyer-side orchestrator) closes the full AdCP buyer
+  loop end-to-end against a live seller and a paired governance agent.
+  Brief intake produces a ranked product proposal; check_governance returns
+  approved; create_media_buy succeeds with a confirmed media_buy_id;
+  report_plan_outcome posts the committed budget; the audit log surfaces
+  both events in chronological order.
+track: orchestrator
+
+narrative: |
+  AdCP 3.x defines the buyer-side governance loop as brief → discovery →
+  check → buy → outcome → audit. PLAN B specifies Abzu as the reference
+  orchestrator implementation of that loop. This scenario closes the happy
+  path: every dependent agent responds successfully and the budget falls
+  within plan authority. Failure-mode storyboards (denied, conditions,
+  governance-down, async lifecycle) are tracked separately.
+
+  Subject under test is Abzu. The seller (purrsonality) and the governance
+  agent (paired abzu-governance instance) are dependencies — the storyboard
+  trusts them to behave per their own compliance contracts. The validations
+  here grade Abzu's orchestration: correct task sequencing, governance
+  context propagation, accurate outcome reporting, and audit completeness.
+
+agent:
+  interaction_model: orchestrator_agent
+  capabilities:
+    - brief_intake
+    - multi_seller_discovery
+    - governance_gated_buy
+    - audit_trail
+
+caller:
+  role: operator
+  example: "Campaign operator (Sam persona) driving Abzu via HTTP"
+
+prerequisites:
+  description: |
+    A running Abzu instance on $context.abzu_base_url (default
+    http://localhost:8787) with GOVERNANCE_AGENT_URI configured to a
+    reachable governance agent, and at least one seller registered in
+    sellers.json that supports media_buy. The governance agent is in
+    enforce mode (default).
+
+phases:
+  - id: plan_setup
+    title: "Register a governance plan via Abzu"
+    steps:
+      - id: sync_plan
+        title: "Sync a single plan to governance"
+        http_method: POST
+        http_path: /governance/plans
+        stateful: true
+        expected: |
+          Governance accepts the plan; Abzu echoes status=completed with
+          the plan registered as active.
+        request_body:
+          plans:
+            - plan_id: "$context.plan_id"
+              brand:
+                domain: "acme.example.com"
+              objectives: "Awareness campaign for grain-free dog food."
+              budget:
+                total: 10000
+                currency: "USD"
+                reallocation_threshold: 5000
+              flight:
+                start: "2026-07-15T00:00:00Z"
+                end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "status"
+            value: "completed"
+          - check: field_value
+            path: "plans[0].status"
+            value: "active"
+          - check: field_value
+            path: "plans[0].plan_id"
+            value: "$context.plan_id"
+
+  - id: discovery
+    title: "Brief intake and proposal ranking"
+    steps:
+      - id: planning_brief
+        title: "Submit brief; expect at least one ranked proposal"
+        http_method: POST
+        http_path: /planning/brief
+        stateful: true
+        expected: |
+          Abzu fans the brief to known sellers, scores returned products,
+          and ranks them. At least one proposal must carry a usable
+          product_id and pricing_option_id.
+        request_body:
+          advertiser:
+            name: "Acme Pet Foods"
+          brief: "Display awareness campaign for grain-free dog food, urban millennials."
+          budget:
+            amount: 5000
+            currency: "USD"
+          flight:
+            start: "2026-07-15"
+            end: "2026-08-15"
+          channels:
+            - "display"
+          top_n: 3
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value_min
+            path: "diagnostics.sellers_responded"
+            value: 1
+          - check: field_value_min
+            path: "proposals.length"
+            value: 1
+          - check: field_present
+            path: "proposals[0].product.product_id"
+          - check: field_present
+            path: "proposals[0].product.pricing_options[0].pricing_option_id"
+          - check: field_present
+            path: "proposals[0].seller_id"
+        captures:
+          - name: seller_id
+            from: "proposals[0].seller_id"
+          - name: product_id
+            from: "proposals[0].product.product_id"
+          - name: pricing_option_id
+            from: "proposals[0].product.pricing_options[0].pricing_option_id"
+
+  - id: execute
+    title: "Governance-gated buy"
+    steps:
+      - id: buy
+        title: "Within-budget buy; expect approved + confirmed media buy + accepted outcome"
+        http_method: POST
+        http_path: /execution/buy
+        stateful: true
+        expected: |
+          Abzu calls check_governance, receives verdict=approved, issues
+          create_media_buy to the seller, receives a media_buy_id, then
+          calls report_plan_outcome with outcome=completed. The composite
+          result surfaces all three sub-results.
+        request_body:
+          seller_id: "$captures.seller_id"
+          plan_id: "$context.plan_id"
+          account:
+            brand:
+              domain: "acme.example.com"
+            operator: "acme.example.com"
+          brand:
+            domain: "acme.example.com"
+            name: "Acme Pet Foods"
+          product_id: "$captures.product_id"
+          pricing_option_id: "$captures.pricing_option_id"
+          budget: 3000
+          currency: "USD"
+          flight:
+            start: "2026-07-15T00:00:00Z"
+            end: "2026-08-15T23:59:59Z"
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "governance_check.verdict"
+            value: "approved"
+          - check: field_present
+            path: "governance_check.check_id"
+          - check: field_present
+            path: "governance_check.governance_context"
+          - check: field_present
+            path: "media_buy.media_buy_id"
+          - check: field_value
+            path: "media_buy.status"
+            value: "completed"
+          - check: field_value
+            path: "outcome.outcome_state"
+            value: "accepted"
+          - check: field_value
+            path: "outcome.committed_budget"
+            value: 3000
+
+  - id: audit
+    title: "Audit trail surfaces both events"
+    steps:
+      - id: audit_query
+        title: "Fetch audit log; expect at least one check and one outcome"
+        http_method: GET
+        http_path: "/governance/audit?plan_ids=$context.plan_id&include_entries=true"
+        stateful: false
+        expected: |
+          The audit ledger contains the approved check from the buy step
+          plus the accepted outcome. plan.status is active.
+        validations:
+          - check: http_status
+            value: 200
+          - check: field_value
+            path: "plans[0].plan_id"
+            value: "$context.plan_id"
+          - check: field_value
+            path: "plans[0].status"
+            value: "active"
+          - check: field_value_min
+            path: "plans[0].summary.checks_performed"
+            value: 1
+          - check: field_value_min
+            path: "plans[0].summary.outcomes_reported"
+            value: 1
+          - check: field_value_min
+            path: "plans[0].entries.length"
+            value: 2
