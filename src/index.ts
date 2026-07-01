@@ -54,6 +54,8 @@ const DISCOVERY_AGENT_RE = /^\/discovery\/agents\/([^/]+)(?:\/(capabilities|form
 
 const BRANDS_CACHE_TTL_MS = 5 * 60 * 1000;
 const brandsCache = new Map<string, { at: number; data: Array<{ domain: string; name: string }> }>();
+const BRAND_RESOLVE_TTL_MS = 30 * 60 * 1000;
+const brandResolveCache = new Map<string, { at: number; data: Record<string, unknown> }>();
 
 function publicSellerView(s: ReturnType<typeof discovery.listAgents>[number]) {
   return {
@@ -462,6 +464,57 @@ async function handle(req: Request): Promise<Response> {
         log.error('seller proxy failed', { err: err instanceof Error ? err.message : String(err) });
         return Response.json({ error: 'seller_unreachable' }, { status: 502 });
       }
+    }
+
+    // Resolve a brand by domain — server-side fetches /.well-known/brand.json
+    // off the brand's own origin. Avoids the CORS dance the GUI would hit if
+    // it tried this from the browser, and lets the orchestrator log the lookup
+    // in audit later. AdCP brand.json shape: { name, tagline, url, categories,
+    // audience, brand_safety } — see adcontextprotocol.org/docs/brand-protocol.
+    if (path === '/brand-resolve' && req.method === 'GET') {
+      const rawDomain = (url.searchParams.get('domain') ?? '').trim().toLowerCase();
+      const domain = rawDomain.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
+        return Response.json({ error: 'invalid_domain' }, { status: 400 });
+      }
+      const cached = brandResolveCache.get(domain);
+      const now = Date.now();
+      if (cached && now - cached.at < BRAND_RESOLVE_TTL_MS) {
+        return Response.json(cached.data, { headers: { 'cache-control': 'no-store' } });
+      }
+      const targets = [
+        `https://${domain}/.well-known/brand.json`,
+        `https://www.${domain}/.well-known/brand.json`,
+      ];
+      for (const target of targets) {
+        try {
+          const fwd = await fetch(target, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(4000),
+            headers: { accept: 'application/json' },
+          });
+          if (!fwd.ok) continue;
+          const json = (await fwd.json()) as Record<string, unknown>;
+          const result = {
+            found: true,
+            source: target,
+            domain,
+            name: typeof json.name === 'string' ? json.name : null,
+            tagline: typeof json.tagline === 'string' ? json.tagline : null,
+            url: typeof json.url === 'string' ? json.url : null,
+            categories: Array.isArray(json.categories) ? json.categories : [],
+            audience: (json.audience as Record<string, unknown>) ?? null,
+            brand_safety: (json.brand_safety as Record<string, unknown>) ?? null,
+          };
+          brandResolveCache.set(domain, { at: now, data: result });
+          return Response.json(result, { headers: { 'cache-control': 'no-store' } });
+        } catch {
+          // try the next target
+        }
+      }
+      const empty = { found: false, domain };
+      brandResolveCache.set(domain, { at: now, data: empty });
+      return Response.json(empty, { headers: { 'cache-control': 'no-store' } });
     }
 
     if (path === '/brands' && req.method === 'GET') {
