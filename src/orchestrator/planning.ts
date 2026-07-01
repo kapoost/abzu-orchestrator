@@ -99,6 +99,10 @@ export class PlanningClient {
         ...(brief.advertiser.id !== undefined ? { brand_id: brief.advertiser.id } : {}),
       } as GetProductsRequest['brand'];
     }
+    const formatIds = resolveFormatIds(brief);
+    if (formatIds.length > 0) {
+      req.filters = { ...(req.filters ?? {}), format_ids: formatIds };
+    }
     return req;
   }
 
@@ -154,4 +158,31 @@ export class PlanningClient {
       };
     }
   }
+}
+
+const STANDARD_FORMAT_AGENT = 'https://creative.adcontextprotocol.org';
+
+/* Turn buyer-side format hints into AdCP FormatReferenceStructuredObject[].
+ * Priority: explicit brief.formats > channel-derived defaults. Without any
+ * filters.format_ids, sellers get no format signal and MAY return empty
+ * (observed with mamamia agent). Even a single conservative default beats
+ * an unqualified request. */
+function resolveFormatIds(brief: BriefIntake): Array<{ agent_url: string; id: string }> {
+  const collected = new Set<string>();
+  for (const raw of brief.formats) {
+    const id = String(raw).trim();
+    if (id) collected.add(id);
+  }
+  if (collected.size === 0) {
+    for (const ch of brief.channels.map((s) => s.toLowerCase())) {
+      if (ch === 'display' || ch === 'banner') {
+        collected.add('display_300x250');
+      } else if (ch === 'video') {
+        collected.add('video_hosted');
+      } else if (ch === 'audio') {
+        collected.add('audio_standard');
+      }
+    }
+  }
+  return [...collected].map((id) => ({ agent_url: STANDARD_FORMAT_AGENT, id }));
 }

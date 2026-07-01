@@ -34,11 +34,12 @@ export type DiscoveryOptions = {
 };
 
 const DEFAULT_FORMATS_TTL_MS = 5 * 60 * 1000;
-// Per-call deadline for capabilities/formats probes — short by design so an
-// unresponsive seller does not stall the multi-agent fan-out in planning.
-// Settlement-time calls (getProducts, createMediaBuy) use the brief's
-// time_budget_seconds via planning.ts.
-const CAPABILITIES_PROBE_TIMEOUT_MS = 8000;
+// Per-call deadline for capabilities/formats probes. Long enough to survive
+// upstream cold starts + auth handshakes + first MCP initialize on slower
+// sellers (equativ, weather-company observed hitting ~10s), short enough to
+// keep dead sellers from stalling the whole fan-out UX. Settlement-time
+// calls (getProducts, createMediaBuy) use brief.time_budget_seconds instead.
+const CAPABILITIES_PROBE_TIMEOUT_MS = 20000;
 
 export class DiscoveryClient {
   private readonly formatsCache: TtlCache<string, Format[]>;

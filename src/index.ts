@@ -388,6 +388,33 @@ async function handle(req: Request): Promise<Response> {
       }
       try {
         const outcome = await creative.sync(input);
+        // Optional side-effect: attach the just-synced creatives to a
+        // media_buy via update_media_buy. Without this the seller's ad
+        // server has no way to attribute served impressions to the caller's
+        // buy — getMediaBuyDelivery returns zeros. GUI opts in by passing
+        // assign_to_media_buy_id after a successful /execution/buy.
+        const assignBuyId = (payload as { assign_to_media_buy_id?: string })?.assign_to_media_buy_id;
+        if (assignBuyId && outcome.status === 'completed') {
+          const creativeIds = outcome.creatives
+            .map((c) => c.creative_id)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+          if (creativeIds.length > 0) {
+            try {
+              const assignRes = await creative.assignToBuy({
+                seller_id: input.seller_id,
+                media_buy_id: assignBuyId,
+                creative_ids: creativeIds,
+                account: input.account,
+              });
+              (outcome as Record<string, unknown>).assignment = assignRes;
+            } catch (err) {
+              (outcome as Record<string, unknown>).assignment = {
+                ok: false,
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+          }
+        }
         return Response.json(outcome);
       } catch (err) {
         if (err instanceof CreativeError) return mapCreativeError(err, input.seller_id);

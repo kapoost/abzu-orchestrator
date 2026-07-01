@@ -4,6 +4,7 @@ import type {
   ListCreativesRequest,
   ListCreativesResponse,
   SyncCreativesRequest,
+  UpdateMediaBuyRequest,
 } from '@adcp/sdk';
 import { ensureIdempotencyKey, type CreativeStatusQuery, type CreativeSyncInput } from '../strategy/creative.ts';
 import type { SellerConfig } from './sellers.ts';
@@ -136,5 +137,39 @@ export class CreativeClient {
         creatives?: CreativeStatusEntry[];
       }).creatives ?? [];
     return { seller_id: query.seller_id, creatives };
+  }
+
+  /* Attach a creative to a media buy so the seller's ad server can attribute
+   * live impressions to the right media_buy_id (see purrsonality
+   * /live/result-slot → mockUpstream.findOrderByCreativeId). Without this
+   * call sync_creatives only lands the creative in the seller's review
+   * library; getMediaBuyDelivery then keeps returning zeros because nothing
+   * links the served creative to the caller's buy. This closes that gap. */
+  async assignToBuy(input: {
+    seller_id: string;
+    media_buy_id: string;
+    creative_ids: string[];
+    account?: unknown;
+    package_id?: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    if (input.creative_ids.length === 0) return { ok: true };
+    const seller = this.sellersById.get(input.seller_id);
+    if (!seller) return { ok: false, error: `unknown seller: ${input.seller_id}` };
+    const request = {
+      ...(input.account !== undefined ? { account: input.account } : {}),
+      media_buy_id: input.media_buy_id,
+      packages: [{
+        ...(input.package_id ? { package_id: input.package_id } : { buyer_ref: 'abzu_default_package' }),
+        creative_assignments: input.creative_ids.map((id) => ({ creative_id: id })),
+      }],
+    } as unknown as UpdateMediaBuyRequest;
+    const result = await this.client.agent(input.seller_id).updateMediaBuy(request);
+    if (!result.success || result.status !== 'completed') {
+      return {
+        ok: false,
+        error: result.success ? `update_media_buy ${result.status}` : (result.error ?? 'task_failed'),
+      };
+    }
+    return { ok: true };
   }
 }
