@@ -21,6 +21,6 @@ primary_region = "fra"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"  # bun + @adcp/sdk + parallel storyboards: OOM at 512mb
+  memory = "2gb"  # bun + @adcp/sdk fan-out: 1gb OOMs on multi-buy + creative sync path
   cpu_kind = "shared"
   cpus = 1
