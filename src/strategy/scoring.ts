@@ -72,7 +72,13 @@ export function publisherKey(product: Product, fallbackSellerId?: string): strin
     const many = (sel as { publisher_domains?: string[] }).publisher_domains;
     if (Array.isArray(many)) for (const d of many) domains.add(d);
   }
-  if (domains.size > 0) return [...domains].sort().join(',');
+  // Dedupe keys are (publisher, product) — the point of dedupe is to
+  // collapse duplicate offerings for the SAME inventory across sellers,
+  // not to collapse a single publisher's multiple placements into one
+  // proposal. Without product_id in the key, a publisher selling both a
+  // landing leaderboard and a results rectangle appears only once in the
+  // ranked output, arbitrarily losing whichever product scored lower.
+  if (domains.size > 0) return [...domains].sort().join(',') + '::' + product.product_id;
   return fallbackSellerId
     ? `__sellerlocal__::${fallbackSellerId}::${product.product_id}`
     : `__no_publisher__::${product.product_id}`;
