@@ -177,17 +177,40 @@ export function evaluateRequirements(
   return { ok: issues.length === 0, issues };
 }
 
-export function buildClient(sellers: ReadonlyArray<SellerConfig>): ADCPMultiAgentClient {
-  return new ADCPMultiAgentClient(
-    sellers.map((s) => ({
-      id: s.id,
-      name: s.name,
-      agent_uri: s.agent_uri,
-      protocol: s.protocol,
-      ...(s.auth_token !== undefined ? { auth_token: s.auth_token } : {}),
-      ...(s.headers !== undefined ? { headers: s.headers } : {}),
-    })),
-  );
+/* Minimal shape shared by anything the multi-agent client can talk to.
+ * SignalsAgentConfig and SellerConfig both satisfy this — the registry is
+ * agnostic about specialism, it just needs id + uri + protocol + optional
+ * auth. */
+interface AgentRegistrationInput {
+  id: string;
+  name: string;
+  agent_uri: string;
+  protocol: 'mcp' | 'a2a';
+  auth_token?: string;
+  headers?: Record<string, string>;
+}
+
+export function buildClient(
+  sellers: ReadonlyArray<SellerConfig>,
+  extraAgents: ReadonlyArray<AgentRegistrationInput> = [],
+): ADCPMultiAgentClient {
+  const seen = new Set<string>();
+  const combined: AgentRegistrationInput[] = [];
+  const emit = (agent: AgentRegistrationInput) => {
+    if (seen.has(agent.id)) return;
+    seen.add(agent.id);
+    combined.push({
+      id: agent.id,
+      name: agent.name,
+      agent_uri: agent.agent_uri,
+      protocol: agent.protocol,
+      ...(agent.auth_token !== undefined ? { auth_token: agent.auth_token } : {}),
+      ...(agent.headers !== undefined ? { headers: agent.headers } : {}),
+    });
+  };
+  for (const s of sellers) emit(s);
+  for (const a of extraAgents) emit(a);
+  return new ADCPMultiAgentClient(combined);
 }
 
 export function createDiscovery(

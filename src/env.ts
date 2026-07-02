@@ -6,6 +6,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   VERSION: z.string().default('0.0.1'),
   SELLERS_CONFIG_PATH: z.string().default('sellers.json'),
+  SIGNALS_CONFIG_PATH: z.string().default('signals.json'),
   DISCOVERY_FORMATS_TTL_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
   GOVERNANCE_AGENT_URI: z.url().optional(),
   GOVERNANCE_AUTH_TOKEN: z.string().min(8).optional(),

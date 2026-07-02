@@ -1,0 +1,24 @@
+{
+  "signals": [
+    {
+      "id": "purrsonality-signals",
+      "name": "Purrsonality Signals",
+      "agent_uri": "https://signals.purrsonality.rocketscience.pl/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "specialisms": ["signal-owned"],
+        "categories": ["pets", "cat-owner", "audience-personality"]
+      }
+    },
+    {
+      "id": "signal-stack",
+      "name": "No Fluff Advisory — Signal Stack",
+      "agent_uri": "https://adcp.signal-stack.io/mcp",
+      "protocol": "mcp",
+      "tags": {
+        "specialisms": ["signal-marketplace"],
+        "categories": ["advisory", "gtm-strategy"]
+      }
+    }
+  ]
+}

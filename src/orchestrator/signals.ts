@@ -1,0 +1,172 @@
+/*
+ * Buyer-side signals discovery — same fan-out shape as PlanningClient for
+ * sellers, but against the `signals` protocol (`get_signals`). The buyer
+ * hands a natural-language brief ("cat owners interested in adventurous
+ * outdoor gear") and any deliver_to hint; we ask every registered signals
+ * agent in parallel, rank the returned segments by coverage percentage,
+ * and hand the aggregated result back to the GUI for buyer review.
+ *
+ * activateSignal is out of scope for the discovery pass — buyers activate
+ * separately once they've picked a segment (nudged by `is_live: false`
+ * marketplace signals that need an explicit activation on a destination).
+ */
+
+import type { ADCPMultiAgentClient, GetSignalsRequest } from '@adcp/sdk';
+import type { SignalsAgentConfig } from './signals-config.ts';
+
+export interface SignalsDiscoveryInput {
+  brief: string;
+  /** Delivery destination hint — mirrors the get_signals request field. */
+  deliver_to?: {
+    platforms?: 'all' | ReadonlyArray<string>;
+    countries?: ReadonlyArray<string>;
+  };
+  /** How many top-scoring segments to keep after ranking across agents. */
+  top_n?: number;
+  /** Per-agent probe deadline (ms). */
+  time_budget_ms?: number;
+}
+
+export interface SignalDiagnostic {
+  agent_id: string;
+  ok: boolean;
+  error?: string;
+  validation_issues?: string[];
+  signals_returned?: number;
+}
+
+export interface RankedSignal {
+  agent_id: string;
+  agent_name: string;
+  signal_id: string;
+  name: string;
+  description?: string;
+  signal_type?: string;
+  data_provider?: string;
+  coverage_percentage?: number;
+  pricing?: unknown;
+  raw: Record<string, unknown>;
+}
+
+export interface SignalsDiscoveryResult {
+  input: SignalsDiscoveryInput;
+  signals: RankedSignal[];
+  diagnostics: {
+    agents_queried: number;
+    agents_responded: number;
+    agents: SignalDiagnostic[];
+  };
+}
+
+const DEFAULT_TIME_BUDGET_MS = 15_000;
+
+export class SignalsClient {
+  private readonly agentsById: Map<string, SignalsAgentConfig>;
+
+  constructor(
+    private readonly client: ADCPMultiAgentClient,
+    agents: ReadonlyArray<SignalsAgentConfig>,
+  ) {
+    this.agentsById = new Map(agents.map((a) => [a.id, a]));
+  }
+
+  listAgents(): SignalsAgentConfig[] {
+    return [...this.agentsById.values()];
+  }
+
+  async discover(input: SignalsDiscoveryInput): Promise<SignalsDiscoveryResult> {
+    const timeoutMs = input.time_budget_ms ?? DEFAULT_TIME_BUDGET_MS;
+    const req: GetSignalsRequest = {
+      signal_spec: input.brief,
+      ...(input.deliver_to && { deliver_to: input.deliver_to as GetSignalsRequest['deliver_to'] }),
+    };
+
+    const perAgent = await Promise.all(
+      [...this.agentsById.values()].map((agent) => this.queryAgent(agent, req, timeoutMs)),
+    );
+
+    const diagnostics: SignalDiagnostic[] = [];
+    const flat: RankedSignal[] = [];
+    for (const r of perAgent) {
+      diagnostics.push(r.diagnostic);
+      if (r.ok) {
+        for (const s of r.signals) flat.push(s);
+      }
+    }
+
+    flat.sort((a, b) => (b.coverage_percentage ?? 0) - (a.coverage_percentage ?? 0));
+    const topN = Math.max(1, Math.min(100, input.top_n ?? 20));
+    const signals = flat.slice(0, topN);
+
+    return {
+      input,
+      signals,
+      diagnostics: {
+        agents_queried: perAgent.length,
+        agents_responded: perAgent.filter((r) => r.ok).length,
+        agents: diagnostics,
+      },
+    };
+  }
+
+  private async queryAgent(
+    agent: SignalsAgentConfig,
+    request: GetSignalsRequest,
+    timeoutMs: number,
+  ): Promise<
+    | { ok: true; signals: RankedSignal[]; diagnostic: SignalDiagnostic }
+    | { ok: false; diagnostic: SignalDiagnostic }
+  > {
+    let result;
+    try {
+      result = await this.client
+        .agent(agent.id)
+        .getSignals(request, undefined, { timeout: timeoutMs });
+    } catch (err) {
+      return {
+        ok: false,
+        diagnostic: {
+          agent_id: agent.id,
+          ok: false,
+          error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+        },
+      };
+    }
+    if (!result.success || result.status !== 'completed') {
+      return {
+        ok: false,
+        diagnostic: {
+          agent_id: agent.id,
+          ok: false,
+          error: result.success
+            ? `task_${result.status}`
+            : result.error ?? 'task_failed',
+        },
+      };
+    }
+    const rawSignals = ((result.data as { signals?: unknown[] }).signals ?? []) as Array<Record<string, unknown>>;
+    const signals: RankedSignal[] = rawSignals.map((r) => ({
+      agent_id: agent.id,
+      agent_name: agent.name,
+      signal_id: String(r['signal_id'] ?? r['id'] ?? ''),
+      name: String(r['name'] ?? r['signal_id'] ?? ''),
+      description: r['description'] ? String(r['description']) : undefined,
+      signal_type: r['signal_type'] ? String(r['signal_type']) : undefined,
+      data_provider: r['data_provider'] ? String(r['data_provider']) : undefined,
+      coverage_percentage:
+        typeof r['coverage_percentage'] === 'number' ? (r['coverage_percentage'] as number) : undefined,
+      pricing: r['pricing_options'] ?? r['pricing'],
+      raw: r,
+    }));
+    return {
+      ok: true,
+      signals,
+      diagnostic: {
+        agent_id: agent.id,
+        ok: true,
+        signals_returned: signals.length,
+      },
+    };
+  }
+
+}

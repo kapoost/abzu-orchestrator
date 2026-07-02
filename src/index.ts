@@ -9,6 +9,7 @@ import {
   ExecutionError,
 } from './orchestrator/index.ts';
 import { loadSellers } from './orchestrator/sellers.ts';
+import { loadSignalsAgents, type SignalsAgentConfig } from './orchestrator/signals-config.ts';
 import { parseBrief } from './strategy/brief.ts';
 import { parseBuyIntake } from './strategy/buy.ts';
 import { parseCreativeSync, parseStatusQuery } from './strategy/creative.ts';
@@ -22,6 +23,17 @@ const env = loadEnv();
 const sellersPath = resolve(env.SELLERS_CONFIG_PATH);
 const sellers = loadSellers(sellersPath);
 log.info('sellers loaded', { path: sellersPath, count: sellers.length });
+
+let signalsAgents: SignalsAgentConfig[] = [];
+try {
+  const signalsPath = resolve(env.SIGNALS_CONFIG_PATH);
+  signalsAgents = loadSignalsAgents(signalsPath);
+  log.info('signals agents loaded', { path: signalsPath, count: signalsAgents.length });
+} catch (err) {
+  log.info('signals agents not configured', {
+    reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+  });
+}
 
 const governance = createGovernanceClient(
   env.GOVERNANCE_AGENT_URI
@@ -39,10 +51,11 @@ if (governance) {
   log.info('governance not configured (set GOVERNANCE_AGENT_URI to enable)');
 }
 
-const { discovery, planning, creative, execution } = createOrchestrator(
+const { discovery, planning, creative, execution, signals: signalsClient } = createOrchestrator(
   sellers,
   { formatsTtlMs: env.DISCOVERY_FORMATS_TTL_MS },
   governance,
+  signalsAgents,
 );
 
 const knownPlans: KnownPlansAdapter = env.DATABASE_URL
@@ -304,6 +317,56 @@ async function handle(req: Request): Promise<Response> {
     }
     if (path === '/discovery/agents') {
       return Response.json({ agents: discovery.listAgents().map(publicSellerView) });
+    }
+
+    if (path === '/discovery/signals/agents') {
+      const agents = signalsClient?.listAgents() ?? [];
+      return Response.json({
+        agents: agents.map((a) => ({
+          id: a.id,
+          name: a.name,
+          agent_uri: a.agent_uri,
+          protocol: a.protocol,
+          tags: a.tags,
+        })),
+      });
+    }
+
+    if (path === '/discovery/signals' && req.method === 'POST') {
+      if (!signalsClient) {
+        return Response.json(
+          { error: 'signals fan-out not configured', code: 'signals_not_configured' },
+          { status: 503 },
+        );
+      }
+      let payload: unknown;
+      try { payload = await req.json(); } catch {
+        return Response.json({ error: 'invalid_json' }, { status: 400 });
+      }
+      const p = (payload ?? {}) as {
+        brief?: string;
+        deliver_to?: { platforms?: unknown; countries?: unknown };
+        top_n?: number;
+        time_budget_ms?: number;
+      };
+      if (typeof p.brief !== 'string' || p.brief.trim().length === 0) {
+        return Response.json(
+          { error: 'brief is required', code: 'validation_failed' },
+          { status: 400 },
+        );
+      }
+      try {
+        const out = await signalsClient.discover({
+          brief: p.brief.trim(),
+          ...(p.deliver_to && { deliver_to: p.deliver_to as { platforms?: 'all' | ReadonlyArray<string>; countries?: ReadonlyArray<string> } }),
+          ...(typeof p.top_n === 'number' && { top_n: p.top_n }),
+          ...(typeof p.time_budget_ms === 'number' && { time_budget_ms: p.time_budget_ms }),
+        });
+        return Response.json(out);
+      } catch (err) {
+        log.error('signals discovery failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'signals_discovery_failed' }, { status: 500 });
+      }
     }
 
     if (path === '/execution/buy' && req.method === 'POST') {

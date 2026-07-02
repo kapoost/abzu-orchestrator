@@ -12,7 +12,7 @@ WORKDIR /app
 RUN addgroup -S adcp && adduser -S -G adcp -u 10001 adcp
 
 COPY --from=install --chown=adcp:adcp /app/node_modules ./node_modules
-COPY --chown=adcp:adcp package.json bun.lock tsconfig.json sellers.json ./
+COPY --chown=adcp:adcp package.json bun.lock tsconfig.json sellers.json signals.json ./
 COPY --chown=adcp:adcp src ./src
 
 USER adcp
