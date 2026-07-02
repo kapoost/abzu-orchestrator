@@ -13,7 +13,7 @@
     "storyboard": "bun run storyboards/cli.ts"
   },
   "dependencies": {
-    "@adcp/sdk": "9.0.0",
+    "@adcp/sdk": "9.6.2",
     "jose": "5.9.6",
     "postgres": "^3.4.9",
     "yaml": "^2.9.0",
