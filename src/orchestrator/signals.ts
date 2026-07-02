@@ -145,11 +145,33 @@ export class SignalsClient {
       };
     }
     const rawSignals = ((result.data as { signals?: unknown[] }).signals ?? []) as Array<Record<string, unknown>>;
-    const signals: RankedSignal[] = rawSignals.map((r) => ({
+    const signals: RankedSignal[] = rawSignals.map((r) => {
+      // AdCP 3.1 emits `signal_id` as `{source, data_provider_domain, id}`.
+      // Older 3.0 responses (and non-signal fields like `signal_agent_segment_id`)
+      // keep it as a plain string. Normalize to a stable string form so
+      // GUI + downstream code always sees a scalar.
+      const rawSigId = r['signal_id'];
+      const canonicalId =
+        typeof rawSigId === 'string'
+          ? rawSigId
+          : rawSigId && typeof rawSigId === 'object'
+            ? (() => {
+                const obj = rawSigId as { id?: unknown; data_provider_domain?: unknown };
+                const id = typeof obj.id === 'string' ? obj.id : '';
+                const domain =
+                  typeof obj.data_provider_domain === 'string' ? obj.data_provider_domain : '';
+                return domain && id ? `${domain}/${id}` : id;
+              })()
+            : '';
+      const fallbackId =
+        canonicalId ||
+        (typeof r['signal_agent_segment_id'] === 'string' ? (r['signal_agent_segment_id'] as string) : '') ||
+        (typeof r['id'] === 'string' ? (r['id'] as string) : '');
+      return {
       agent_id: agent.id,
       agent_name: agent.name,
-      signal_id: String(r['signal_id'] ?? r['id'] ?? ''),
-      name: String(r['name'] ?? r['signal_id'] ?? ''),
+      signal_id: fallbackId,
+      name: String(r['name'] ?? fallbackId ?? ''),
       description: r['description'] ? String(r['description']) : undefined,
       signal_type: r['signal_type'] ? String(r['signal_type']) : undefined,
       data_provider: r['data_provider'] ? String(r['data_provider']) : undefined,
@@ -157,7 +179,8 @@ export class SignalsClient {
         typeof r['coverage_percentage'] === 'number' ? (r['coverage_percentage'] as number) : undefined,
       pricing: r['pricing_options'] ?? r['pricing'],
       raw: r,
-    }));
+      };
+    });
     return {
       ok: true,
       signals,
