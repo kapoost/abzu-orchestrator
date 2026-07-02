@@ -206,12 +206,92 @@ const server = Bun.serve({
   },
 });
 
+/* MCP webhook receiver — implements the buyer/orchestrator side of the
+ * webhook_receiver_envelope compliance storyboard. Accepts MCP webhook
+ * envelopes, rejects bare inner results, dedupes retries by a stable
+ * idempotency_key. Signature verification is out of scope until the
+ * storyboard runner registers a signing key here; envelope-shape errors
+ * already surface the failing checks. */
+const ABZU_WEBHOOK_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+const abzuWebhookSeen = new Map<string, number>();
+const ABZU_TASK_STATUS_ENUM = new Set([
+  'submitted', 'working', 'input_required', 'completed', 'canceled', 'failed',
+  'auth_required', 'rejected', 'partial', 'processing', 'pending',
+]);
+
+async function handleAdcpWebhook(req: Request): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return Response.json({ ok: false, error: 'invalid_json', message: 'Request body must be JSON.' }, { status: 400 });
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return Response.json({ ok: false, error: 'invalid_envelope', message: 'Body must be a JSON object.' }, { status: 400 });
+  }
+  const body = raw as Record<string, unknown>;
+  const hasEnvelopeMarkers = ['idempotency_key', 'operation_id', 'task_id', 'task_type'].some((k) => k in body);
+  if (!hasEnvelopeMarkers) {
+    return Response.json({
+      ok: false,
+      error: 'missing_envelope_fields',
+      message: 'Body is not an MCP webhook envelope. Expected top-level idempotency_key, operation_id, task_id, task_type, status, timestamp, and result.',
+      missing_fields: ['idempotency_key', 'operation_id', 'task_id', 'task_type', 'status', 'timestamp'],
+    }, { status: 400 });
+  }
+  const idempotencyKey = body['idempotency_key'];
+  if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) {
+    return Response.json({
+      ok: false,
+      error: 'missing_idempotency_key',
+      message: 'MCP webhook envelope requires a non-empty idempotency_key so the receiver can safely dedupe retries.',
+    }, { status: 400 });
+  }
+  const status = body['status'];
+  if (typeof status !== 'string' || !ABZU_TASK_STATUS_ENUM.has(status)) {
+    return Response.json({
+      ok: false,
+      error: 'invalid_envelope_status',
+      message: 'Top-level status must be a task-status enum value. Media buy lifecycle values (e.g. active) belong under result.media_buy_deliveries[].status.',
+      received_status: status,
+      allowed_task_statuses: [...ABZU_TASK_STATUS_ENUM],
+    }, { status: 400 });
+  }
+  const missing: string[] = [];
+  for (const k of ['operation_id', 'task_id', 'task_type', 'timestamp'] as const) {
+    if (typeof body[k] !== 'string' || (body[k] as string).length === 0) missing.push(k);
+  }
+  if (missing.length > 0) {
+    return Response.json(
+      { ok: false, error: 'missing_envelope_fields', message: `Envelope missing required fields: ${missing.join(', ')}.`, missing_fields: missing },
+      { status: 400 },
+    );
+  }
+  // Bounded map prune: drop entries older than the TTL window.
+  const cutoff = Date.now() - ABZU_WEBHOOK_DEDUP_TTL_MS;
+  for (const [k, ts] of abzuWebhookSeen) if (ts < cutoff) abzuWebhookSeen.delete(k);
+  const alreadySeen = abzuWebhookSeen.has(idempotencyKey);
+  abzuWebhookSeen.set(idempotencyKey, Date.now());
+  return Response.json({
+    ok: true,
+    accepted: true,
+    duplicate: alreadySeen,
+    idempotency_key: idempotencyKey,
+    task_type: body['task_type'],
+    task_id: body['task_id'],
+  }, { status: 200 });
+}
+
 async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
 
     if (path === '/healthz') {
       return Response.json({ status: 'ok', agent: 'abzu', version: env.VERSION });
+    }
+
+    if (path === '/webhooks/adcp' && req.method === 'POST') {
+      return handleAdcpWebhook(req);
     }
     if (path === '/') {
       return Response.json({
