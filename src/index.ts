@@ -410,6 +410,40 @@ async function handle(req: Request): Promise<Response> {
       return Response.json(out);
     }
 
+    // Live agent-health probe — fans /.well-known/healthz in parallel with
+    // a per-agent 2.5s deadline, returns a compact record the GUI paints
+    // as coloured chips in the topbar. Read-only, cheap; safe to poll on
+    // a 15s interval from every open Sam / Riley / Taylor tab.
+    if (path === '/agents/status' && req.method === 'GET') {
+      const targets: Array<{ id: string; url: string }> = [
+        { id: 'seller', url: 'https://seller.purrsonality.rocketscience.pl/.well-known/healthz' },
+        { id: 'signals', url: 'https://signals.purrsonality.rocketscience.pl/.well-known/healthz' },
+        { id: 'governance', url: 'https://governance.rocketscience.pl/.well-known/healthz' },
+      ];
+      if (env.CREATIVE_AGENT_URI) {
+        targets.push({ id: 'creative', url: `${env.CREATIVE_AGENT_URI.replace(/\/$/, '')}/healthz` });
+      }
+      const probes = await Promise.all(
+        targets.map(async (t) => {
+          const started = performance.now();
+          try {
+            const r = await fetch(t.url, { signal: AbortSignal.timeout(2500) });
+            const latency_ms = Math.round(performance.now() - started);
+            return { id: t.id, ok: r.ok, latency_ms, status: r.status };
+          } catch (err) {
+            const latency_ms = Math.round(performance.now() - started);
+            return {
+              id: t.id,
+              ok: false,
+              latency_ms,
+              error: err instanceof Error ? err.message.slice(0, 100) : 'error',
+            };
+          }
+        }),
+      );
+      return Response.json({ ok: true, agents: probes });
+    }
+
     // Warmup fan-out — abzu-gui fires this on Sam view load so every
     // downstream agent's Fly machine gets a wake-up ping before the buyer
     // clicks Discover / Generate / Execute. Fire-and-forget: we don't
