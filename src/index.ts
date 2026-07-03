@@ -369,6 +369,47 @@ async function handle(req: Request): Promise<Response> {
       }
     }
 
+    if (path === '/discovery/signals/activate' && req.method === 'POST') {
+      if (!signalsClient) {
+        return Response.json(
+          { error: 'signals fan-out not configured', code: 'signals_not_configured' },
+          { status: 503 },
+        );
+      }
+      let payload: unknown;
+      try { payload = await req.json(); } catch {
+        return Response.json({ error: 'invalid_json' }, { status: 400 });
+      }
+      const p = (payload ?? {}) as {
+        agent_id?: string;
+        signal_agent_segment_id?: string;
+        destinations?: unknown;
+        action?: 'activate' | 'deactivate';
+        pricing_option_id?: string;
+        account?: unknown;
+        time_budget_ms?: number;
+      };
+      if (typeof p.agent_id !== 'string' || p.agent_id.trim().length === 0) {
+        return Response.json({ error: 'agent_id is required', code: 'validation_failed' }, { status: 400 });
+      }
+      if (typeof p.signal_agent_segment_id !== 'string' || p.signal_agent_segment_id.trim().length === 0) {
+        return Response.json({ error: 'signal_agent_segment_id is required', code: 'validation_failed' }, { status: 400 });
+      }
+      if (!Array.isArray(p.destinations) || p.destinations.length === 0) {
+        return Response.json({ error: 'destinations[] required', code: 'validation_failed' }, { status: 400 });
+      }
+      const out = await signalsClient.activate({
+        agent_id: p.agent_id.trim(),
+        signal_agent_segment_id: p.signal_agent_segment_id.trim(),
+        destinations: p.destinations as never,
+        ...(p.action && { action: p.action }),
+        ...(p.pricing_option_id && { pricing_option_id: p.pricing_option_id }),
+        ...(p.account && typeof p.account === 'object' ? { account: p.account as never } : {}),
+        ...(typeof p.time_budget_ms === 'number' && { time_budget_ms: p.time_budget_ms }),
+      });
+      return Response.json(out);
+    }
+
     if (path === '/execution/buy' && req.method === 'POST') {
       if (!execution) {
         return Response.json(

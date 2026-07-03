@@ -11,7 +11,8 @@
  * marketplace signals that need an explicit activation on a destination).
  */
 
-import type { ADCPMultiAgentClient, GetSignalsRequest } from '@adcp/sdk';
+import { randomUUID } from 'node:crypto';
+import type { ADCPMultiAgentClient, GetSignalsRequest, ActivateSignalRequest } from '@adcp/sdk';
 import type { SignalsAgentConfig } from './signals-config.ts';
 
 export interface SignalsDiscoveryInput {
@@ -107,6 +108,69 @@ export class SignalsClient {
         agents: diagnostics,
       },
     };
+  }
+
+  /* Buyer-side activate_signal fan-in — hits a single named signals agent
+   * with the destinations + pricing option the buyer chose. Returns the
+   * raw activate_signal response so the GUI can inspect deployment keys,
+   * status, and any partial-failure error entries. Deliberately not a
+   * fan-out — a single activation is scoped to a single upstream signal
+   * agent (the one that emitted the signal id in get_signals). */
+  async activate(input: {
+    agent_id: string;
+    signal_agent_segment_id: string;
+    destinations: ActivateSignalRequest['destinations'];
+    action?: 'activate' | 'deactivate';
+    pricing_option_id?: string;
+    account?: ActivateSignalRequest['account'];
+    idempotency_key?: string;
+    time_budget_ms?: number;
+  }): Promise<{
+    ok: boolean;
+    agent_id: string;
+    status?: string;
+    response?: unknown;
+    error?: string;
+  }> {
+    const agent = this.agentsById.get(input.agent_id);
+    if (!agent) {
+      return { ok: false, agent_id: input.agent_id, error: `unknown signals agent: ${input.agent_id}` };
+    }
+    const timeoutMs = input.time_budget_ms ?? DEFAULT_TIME_BUDGET_MS;
+    const req: ActivateSignalRequest = {
+      signal_agent_segment_id: input.signal_agent_segment_id,
+      destinations: input.destinations,
+      ...(input.action && { action: input.action }),
+      ...(input.pricing_option_id && { pricing_option_id: input.pricing_option_id }),
+      ...(input.account && { account: input.account }),
+      idempotency_key: input.idempotency_key ?? `abzu_activate_${randomUUID().replace(/-/g, '')}`,
+    };
+    try {
+      const result = await this.client
+        .agent(agent.id)
+        .activateSignal(req, undefined, { timeout: timeoutMs });
+      if (!result.success || result.status !== 'completed') {
+        return {
+          ok: false,
+          agent_id: agent.id,
+          status: result.status,
+          response: result,
+          error: result.success ? `task_${result.status}` : result.error ?? 'task_failed',
+        };
+      }
+      return {
+        ok: true,
+        agent_id: agent.id,
+        status: result.status,
+        response: result.data,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        agent_id: agent.id,
+        error: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
+      };
+    }
   }
 
   private async queryAgent(
