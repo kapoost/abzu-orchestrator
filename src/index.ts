@@ -410,6 +410,32 @@ async function handle(req: Request): Promise<Response> {
       return Response.json(out);
     }
 
+    // Warmup fan-out — abzu-gui fires this on Sam view load so every
+    // downstream agent's Fly machine gets a wake-up ping before the buyer
+    // clicks Discover / Generate / Execute. Fire-and-forget: we don't
+    // block on responses, just hit /.well-known/healthz on each host and
+    // return immediately with the list attempted. Removes the cold-start
+    // TIMEOUT that plagued the demo's first click after idle.
+    if (path === '/warmup' && req.method === 'POST') {
+      const targets = [
+        'https://seller.purrsonality.rocketscience.pl/.well-known/healthz',
+        'https://signals.purrsonality.rocketscience.pl/.well-known/healthz',
+        'https://governance.rocketscience.pl/.well-known/healthz',
+        ...(env.CREATIVE_AGENT_URI
+          ? [`${env.CREATIVE_AGENT_URI.replace(/\/$/, '')}/healthz`]
+          : []),
+      ];
+      for (const url of targets) {
+        // Detached, timeout short — the only goal is to trigger Fly's
+        // wake path; the actual response is discarded. Errors on cold
+        // TCP are expected (proxy returns 502 before wake completes),
+        // second wake attempt not needed — the demo's real click comes
+        // seconds later and will hit the woken machine.
+        void fetch(url, { signal: AbortSignal.timeout(2000) }).catch(() => {});
+      }
+      return Response.json({ ok: true, warmed: targets });
+    }
+
     // Proxy to the creative-generative agent. Two endpoints keep the wire
     // simple: /creative/order fires build_creative, /creative/status/:id
     // polls the async task. Bearer for the creative agent lives server-side
