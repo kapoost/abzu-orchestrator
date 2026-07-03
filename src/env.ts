@@ -25,6 +25,13 @@ const envSchema = z.object({
   // When unset, /brands returns 503 — the GUI falls back to the static
   // brands.json snapshot shipped with abzu-gui.
   AAO_BEARER_TOKEN: z.string().min(8).optional(),
+  // Creative generative agent — build_creative fan-out target for the
+  // "Generate creatives" button in Sam view. When unset the /creative
+  // proxy endpoints return 503. Bearer is stored server-side; the GUI
+  // never sees it. Trust-key gate is handled per-call by the caller
+  // passing X-Creative-Trust-Key through.
+  CREATIVE_AGENT_URI: z.url().optional(),
+  CREATIVE_AGENT_AUTH_TOKEN: z.string().min(8).optional(),
   DATABASE_URL: z
     .string()
     .optional()

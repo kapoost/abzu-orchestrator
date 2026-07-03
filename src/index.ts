@@ -410,6 +410,68 @@ async function handle(req: Request): Promise<Response> {
       return Response.json(out);
     }
 
+    // Proxy to the creative-generative agent. Two endpoints keep the wire
+    // simple: /creative/order fires build_creative, /creative/status/:id
+    // polls the async task. Bearer for the creative agent lives server-side
+    // (env.CREATIVE_AGENT_AUTH_TOKEN); the trust-key gate is a per-call
+    // header the caller forwards through — we pipe X-Creative-Trust-Key
+    // straight to the agent, we don't inspect or store it. When
+    // CREATIVE_AGENT_URI isn't set the endpoints reply 503 so the GUI can
+    // hide the button cleanly.
+    if (path === '/creative/order' && req.method === 'POST') {
+      if (!env.CREATIVE_AGENT_URI || !env.CREATIVE_AGENT_AUTH_TOKEN) {
+        return Response.json({ error: 'creative agent not configured', code: 'creative_disabled' }, { status: 503 });
+      }
+      let body: unknown;
+      try { body = await req.json(); } catch { return Response.json({ error: 'invalid_json' }, { status: 400 }); }
+      const target = `${env.CREATIVE_AGENT_URI.replace(/\/$/, '')}/build`;
+      const trustKey = req.headers.get('x-creative-trust-key');
+      try {
+        const fwd = await fetch(target, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${env.CREATIVE_AGENT_AUTH_TOKEN}`,
+            'content-type': 'application/json',
+            ...(trustKey ? { 'x-creative-trust-key': trustKey } : {}),
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(20_000),
+        });
+        const text = await fwd.text();
+        return new Response(text, {
+          status: fwd.status,
+          headers: { 'content-type': fwd.headers.get('content-type') ?? 'application/json' },
+        });
+      } catch (err) {
+        log.error('creative proxy failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'creative_unreachable' }, { status: 502 });
+      }
+    }
+
+    const creativeStatusMatch = path.match(/^\/creative\/status\/([A-Za-z0-9_-]+)$/);
+    if (creativeStatusMatch && req.method === 'GET') {
+      if (!env.CREATIVE_AGENT_URI || !env.CREATIVE_AGENT_AUTH_TOKEN) {
+        return Response.json({ error: 'creative agent not configured', code: 'creative_disabled' }, { status: 503 });
+      }
+      const taskId = creativeStatusMatch[1]!;
+      const target = `${env.CREATIVE_AGENT_URI.replace(/\/$/, '')}/tasks/${encodeURIComponent(taskId)}`;
+      try {
+        const fwd = await fetch(target, {
+          method: 'GET',
+          headers: { authorization: `Bearer ${env.CREATIVE_AGENT_AUTH_TOKEN}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const text = await fwd.text();
+        return new Response(text, {
+          status: fwd.status,
+          headers: { 'content-type': fwd.headers.get('content-type') ?? 'application/json' },
+        });
+      } catch (err) {
+        log.error('creative status proxy failed', { err: err instanceof Error ? err.message : String(err) });
+        return Response.json({ error: 'creative_unreachable' }, { status: 502 });
+      }
+    }
+
     if (path === '/execution/buy' && req.method === 'POST') {
       if (!execution) {
         return Response.json(
