@@ -319,6 +319,91 @@ async function handle(req: Request): Promise<Response> {
       return Response.json({ agents: discovery.listAgents().map(publicSellerView) });
     }
 
+    // Server-side image URL probe. The GUI's client-side HEAD check runs
+    // through the browser, which sends `Sec-Fetch-*` headers and a real
+    // User-Agent — some hotlink-protected origins (e.g. lays.pl) return 200
+    // to the browser but 403 to a bare fetch. The seller's live-slot
+    // handler runs a bare fetch, so a creative that "checks green" in the
+    // GUI silently disappears from rotation. This endpoint runs the same
+    // bare fetch the seller would run and reports back so the operator
+    // knows to swap the URL BEFORE the buy executes.
+    if (path === '/api/probe-image' && req.method === 'GET') {
+      const target = url.searchParams.get('url')?.trim() ?? '';
+      if (!target) {
+        return Response.json({ ok: false, reason: 'missing url' }, { status: 400 });
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(target);
+      } catch {
+        return Response.json({ ok: false, reason: 'not a valid URL' }, { status: 400 });
+      }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return Response.json({
+          ok: false,
+          reason: `unsupported protocol ${parsed.protocol}`,
+        });
+      }
+      // Seller's /live/*-slot inline-cache has a 3 MB budget; anything
+      // over that gets dropped from rotation. Report it back so the GUI can
+      // warn the operator before the buy.
+      const SELLER_INLINE_MAX_BYTES = 3 * 1024 * 1024;
+      try {
+        const r = await fetch(target, {
+          signal: AbortSignal.timeout(6000),
+          headers: { accept: 'image/*' },
+          redirect: 'follow',
+        });
+        const rawCt = r.headers.get('content-type') ?? '';
+        const contentType = rawCt.split(';')[0]?.trim() ?? '';
+        if (!r.ok) {
+          return Response.json({
+            ok: false,
+            status: r.status,
+            contentType,
+            reason: `origin returned ${r.status} — the seller-side fetch will fail; banner will not appear in rotation`,
+          });
+        }
+        if (!contentType.startsWith('image/')) {
+          return Response.json({
+            ok: false,
+            status: r.status,
+            contentType,
+            reason: `origin returned "${contentType || 'no content-type'}" — not image/*, the seller-side fetch will drop this creative`,
+          });
+        }
+        const contentLengthHeader = r.headers.get('content-length');
+        const declaredBytes = contentLengthHeader ? Number(contentLengthHeader) : NaN;
+        // Trust content-length when present + finite; otherwise pull the
+        // body and measure so the operator gets a real number back rather
+        // than a shrug.
+        const sizeBytes = Number.isFinite(declaredBytes) && declaredBytes > 0
+          ? declaredBytes
+          : (await r.arrayBuffer()).byteLength;
+        if (sizeBytes > SELLER_INLINE_MAX_BYTES) {
+          return Response.json({
+            ok: false,
+            status: r.status,
+            contentType,
+            sizeBytes,
+            reason: `image is ${(sizeBytes / (1024 * 1024)).toFixed(2)} MB — over the seller's 3 MB inline budget; banner will not appear in rotation. Shrink the asset upstream or serve a re-encoded copy.`,
+          });
+        }
+        return Response.json({
+          ok: true,
+          status: r.status,
+          contentType,
+          sizeBytes,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return Response.json({
+          ok: false,
+          reason: `seller-side fetch failed: ${msg.slice(0, 200)}`,
+        });
+      }
+    }
+
     if (path === '/discovery/signals/agents') {
       const agents = signalsClient?.listAgents() ?? [];
       return Response.json({
