@@ -37,6 +37,16 @@ export async function createPostgresKnownPlans(databaseUrl: string): Promise<Kno
 
   let cache: { at: number; entries: KnownPlanEntry[] } | null = null;
   let inflight: Promise<KnownPlanEntry[]> | null = null;
+  // Warm mirror of every plan we've ever successfully read or written this
+  // process lifetime. When Neon is degraded (compute quota exhausted, etc.)
+  // list() falls back to this map so the UI shows something coherent instead
+  // of 500ing. Contents lost on restart; that's the tradeoff for keeping the
+  // hot path zero-config vs adding a Fly volume for a snapshot file.
+  const memoryMirror = new Map<string, KnownPlanEntry>();
+
+  function mirrorEntries(): KnownPlanEntry[] {
+    return [...memoryMirror.values()].sort((a, b) => b.synced_at.localeCompare(a.synced_at));
+  }
 
   async function fetchFresh(): Promise<KnownPlanEntry[]> {
     const rows = await sql<Array<{ plan_id: string; brand_domain: string | null; synced_at: Date }>>`
@@ -44,7 +54,7 @@ export async function createPostgresKnownPlans(databaseUrl: string): Promise<Kno
       FROM abzu_known_plans
       ORDER BY synced_at DESC
     `;
-    return rows.map((r) => {
+    const entries = rows.map((r) => {
       const entry: KnownPlanEntry = {
         plan_id: r.plan_id,
         synced_at: r.synced_at.toISOString(),
@@ -52,28 +62,43 @@ export async function createPostgresKnownPlans(databaseUrl: string): Promise<Kno
       if (r.brand_domain) entry.brand_domain = r.brand_domain;
       return entry;
     });
+    for (const e of entries) memoryMirror.set(e.plan_id, e);
+    return entries;
   }
 
   return {
     async remember(planId, brandDomain) {
-      await sql`
-        INSERT INTO abzu_known_plans (plan_id, brand_domain, synced_at)
-        VALUES (${planId}, ${brandDomain ?? null}, NOW())
-        ON CONFLICT (plan_id) DO UPDATE
-          SET brand_domain = EXCLUDED.brand_domain,
-              synced_at = EXCLUDED.synced_at
-      `;
+      const entry: KnownPlanEntry = {
+        plan_id: planId,
+        synced_at: new Date().toISOString(),
+      };
+      if (brandDomain) entry.brand_domain = brandDomain;
+      memoryMirror.set(planId, entry);
+      try {
+        await sql`
+          INSERT INTO abzu_known_plans (plan_id, brand_domain, synced_at)
+          VALUES (${planId}, ${brandDomain ?? null}, NOW())
+          ON CONFLICT (plan_id) DO UPDATE
+            SET brand_domain = EXCLUDED.brand_domain,
+                synced_at = EXCLUDED.synced_at
+        `;
+      } catch (err) {
+        console.warn('[abzu/known-plans] remember() Postgres write failed, kept in-memory only:', err instanceof Error ? err.message : String(err));
+      }
       cache = null;
     },
     async list() {
       const now = Date.now();
       if (cache && now - cache.at < LIST_CACHE_TTL_MS) return cache.entries;
-      // Coalesce concurrent misses so 10 parallel viewers = 1 query, not 10.
       if (inflight) return inflight;
       inflight = fetchFresh()
         .then((entries) => {
           cache = { at: Date.now(), entries };
           return entries;
+        })
+        .catch((err) => {
+          console.warn('[abzu/known-plans] list() Postgres read failed, serving memory mirror:', err instanceof Error ? err.message : String(err));
+          return mirrorEntries();
         })
         .finally(() => {
           inflight = null;
