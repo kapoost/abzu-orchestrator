@@ -128,7 +128,7 @@ export class PlanningClient {
     }
     const result = await this.client
       .agent(seller.id)
-      .getProducts(request, undefined, { timeout: timeoutMs, project: false });
+      .getProducts(request, undefined, { timeout: timeoutMs });
     if (!result.success || result.status !== 'completed') {
       return {
         ok: false,

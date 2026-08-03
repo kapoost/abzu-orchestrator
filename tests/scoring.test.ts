@@ -20,7 +20,7 @@ function makeBrief(overrides: Partial<BriefIntake> = {}): BriefIntake {
   }) as BriefIntake;
 }
 
-function makeProduct(overrides: Partial<Product> = {}): Product {
+function makeProduct(overrides: Record<string, unknown> = {}): Product {
   return {
     product_id: 'p1',
     name: 'Product 1',
@@ -32,7 +32,7 @@ function makeProduct(overrides: Partial<Product> = {}): Product {
     channels: ['display'],
     format_ids: [{ agent_url: 'https://x', id: 'display_300x250' }],
     ...overrides,
-  } as Product;
+  } as unknown as Product;
 }
 
 describe('scoreProduct', () => {

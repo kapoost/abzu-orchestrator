@@ -17,12 +17,18 @@ export type ScoredProduct = {
 
 function formatIds(product: Product): string[] {
   const ids: string[] = [];
-  for (const ref of product.format_ids ?? []) {
-    if (typeof ref === 'object' && ref !== null && 'id' in ref && typeof ref.id === 'string') {
-      ids.push(ref.id);
+  // Products from legacy sellers may still carry format_ids at runtime even
+  // though the CanonicalProduct type asserts never — we accept both shapes.
+  const legacyRefs = (product as { format_ids?: ReadonlyArray<unknown> }).format_ids;
+  for (const ref of legacyRefs ?? []) {
+    if (typeof ref === 'string') {
+      ids.push(ref);
+    } else if (typeof ref === 'object' && ref !== null && 'id' in ref && typeof (ref as { id?: unknown }).id === 'string') {
+      ids.push((ref as { id: string }).id);
     }
   }
-  for (const opt of product.format_options ?? []) {
+  const canonical = (product as { format_options?: ReadonlyArray<unknown> }).format_options;
+  for (const opt of canonical ?? []) {
     const maybeId = (opt as { format_option_id?: unknown }).format_option_id;
     if (typeof maybeId === 'string') ids.push(maybeId);
     const params = (opt as { params?: { id?: unknown } }).params;
@@ -50,7 +56,8 @@ export function scoreProduct(product: Product, brief: BriefIntake): ScoreBreakdo
           )
         ? 1
         : 0;
-  const brief_response = product.brief_relevance && product.brief_relevance.length > 0 ? 1 : 0.5;
+  const briefRelevance = (product as { brief_relevance?: string }).brief_relevance;
+  const brief_response = briefRelevance && briefRelevance.length > 0 ? 1 : 0.5;
   return { format_match, channel_match, delivery_match, brief_response };
 }
 
@@ -66,7 +73,8 @@ export function totalScore(breakdown: ScoreBreakdown): number {
 
 export function publisherKey(product: Product, fallbackSellerId?: string): string {
   const domains = new Set<string>();
-  for (const sel of product.publisher_properties ?? []) {
+  const pubProps = (product as { publisher_properties?: ReadonlyArray<unknown> }).publisher_properties;
+  for (const sel of pubProps ?? []) {
     const one = (sel as { publisher_domain?: string }).publisher_domain;
     if (typeof one === 'string') domains.add(one);
     const many = (sel as { publisher_domains?: string[] }).publisher_domains;

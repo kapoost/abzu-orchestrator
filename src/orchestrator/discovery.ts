@@ -1,8 +1,8 @@
 import { ADCPMultiAgentClient } from '@adcp/sdk';
 import type {
-  Format,
+  LegacyFormat as Format,
   GetAdCPCapabilitiesResponse,
-  ListCreativeFormatsRequest,
+  LegacyListCreativeFormatsRequest as ListCreativeFormatsRequest,
 } from '@adcp/sdk';
 import { TtlCache } from './cache.ts';
 import type { SellerConfig } from './sellers.ts';
@@ -106,10 +106,10 @@ export class DiscoveryClient {
     const result = await Promise.race([
       this.client
         .agent(agentId)
-        .listCreativeFormats(params, undefined, { timeout: CAPABILITIES_PROBE_TIMEOUT_MS }),
+        .listCreativeFormatsLegacy(params, undefined, { timeout: CAPABILITIES_PROBE_TIMEOUT_MS }),
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error(`listCreativeFormats timeout ${CAPABILITIES_PROBE_TIMEOUT_MS}ms`)),
+          () => reject(new Error(`listCreativeFormatsLegacy timeout ${CAPABILITIES_PROBE_TIMEOUT_MS}ms`)),
           CAPABILITIES_PROBE_TIMEOUT_MS,
         ).unref(),
       ),
