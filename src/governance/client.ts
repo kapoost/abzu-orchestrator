@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ProtocolClient } from '@adcp/sdk';
+import { log } from '../observability/logger.ts';
 import type {
   AgentConfig,
   CheckGovernanceRequest,
@@ -11,6 +12,51 @@ import type {
   SyncPlansRequest,
   SyncPlansResponse,
 } from '@adcp/sdk';
+
+// Fly suspends both this app and governance when idle. On wake the first
+// outbound call lands on a socket that did not survive the suspend, or on a
+// governance instance still booting — observed 2026-08-24: abzu's machine
+// started at 08:41:04 and logged `sync_plans failed: The socket connection was
+// closed unexpectedly` at 08:41:05, while governance only finished registering
+// tools at 08:41:16, eleven seconds later.
+//
+// Two guards, because the failure has two shapes. Retries cover the dropped
+// socket; the timeout covers the opposite case, where a cold governance accepts
+// the connection and then leaves us hanging — an untimed retry of that turned a
+// fast failure into a 300s stall. Same shape as the seller's retryingQueryable()
+// for Neon after the 2026-07-03 pool incident.
+//
+// Idempotency keys are minted by the callers before `call`, so every retry
+// re-sends the same key and governance dedupes rather than double-applying.
+const CALL_ATTEMPTS = 3;
+const CALL_TIMEOUT_MS = 20_000;
+const CALL_BACKOFF_MS = [500, 2_000];
+
+const RETRIABLE_TRANSPORT =
+  /socket connection was closed|socket hang up|fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|timed out|502|503|504/i;
+
+function isRetriableTransport(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return RETRIABLE_TRANSPORT.test(message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export type GovernanceAgentConfig = {
   id: string;
@@ -107,24 +153,46 @@ export class GovernanceClient {
   }
 
   private async call<R>(tool: string, params: unknown): Promise<R> {
-    try {
-      const raw = await ProtocolClient.callTool(this.agent, tool, params as Record<string, unknown>);
-      const unwrapped = unwrapMcpEnvelope(raw);
-      const adcpError = (unwrapped as { adcp_error?: { message?: string } }).adcp_error;
-      if (adcpError) {
-        throw new GovernanceError(
-          `${tool} rejected: ${adcpError.message ?? 'validation failed'}`,
-          'task_failed',
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < CALL_ATTEMPTS; attempt++) {
+      try {
+        const raw = await withTimeout(
+          ProtocolClient.callTool(this.agent, tool, params as Record<string, unknown>),
+          CALL_TIMEOUT_MS,
+          `${tool} timed out after ${CALL_TIMEOUT_MS}ms`,
         );
+        const unwrapped = unwrapMcpEnvelope(raw);
+        const adcpError = (unwrapped as { adcp_error?: { message?: string } }).adcp_error;
+        if (adcpError) {
+          // A protocol-level rejection is deterministic — governance evaluated
+          // the request and said no. Retrying re-asks the same question.
+          throw new GovernanceError(
+            `${tool} rejected: ${adcpError.message ?? 'validation failed'}`,
+            'task_failed',
+          );
+        }
+        return unwrapped as R;
+      } catch (err) {
+        if (err instanceof GovernanceError) throw err;
+        lastErr = err;
+        if (attempt === CALL_ATTEMPTS - 1 || !isRetriableTransport(err)) break;
+        // Log every retry. A retry that recovers silently is indistinguishable
+        // from a call that never had trouble, which hides a degrading
+        // dependency until it fails outright.
+        log.warn('governance call retrying', {
+          tool,
+          attempt: attempt + 1,
+          of: CALL_ATTEMPTS,
+          backoff_ms: CALL_BACKOFF_MS[attempt] ?? 1000,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        await sleep(CALL_BACKOFF_MS[attempt] ?? 1000);
       }
-      return unwrapped as R;
-    } catch (err) {
-      if (err instanceof GovernanceError) throw err;
-      throw new GovernanceError(
-        `${tool} failed: ${err instanceof Error ? err.message : String(err)}`,
-        'task_failed',
-      );
     }
+    throw new GovernanceError(
+      `${tool} failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+      'task_failed',
+    );
   }
 
   private freshKey(): string {
