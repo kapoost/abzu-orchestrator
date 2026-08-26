@@ -232,10 +232,19 @@ const server = Bun.serve({
     if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
       const verified = await verifyAuth(req.headers.get('authorization'));
       if (!verified.ok) {
+        // RFC 9728 §5.1: the challenge is how a client discovers where the
+        // protected-resource document lives. Serving the document alone is not
+        // enough — without `resource_metadata` here there is nothing pointing at
+        // it, which is why security_baseline still reported
+        // `auth_mechanism_verified: []` after the document went up.
+        const challenge =
+          `Bearer realm="mcp", error="invalid_token", ` +
+          `error_description=${JSON.stringify(verified.error)}, ` +
+          `resource_metadata="${env.OAUTH_AUDIENCE}/.well-known/oauth-protected-resource/mcp"`;
         return withCors(
           Response.json(
             { error: 'invalid_token', error_description: verified.error },
-            { status: verified.status },
+            { status: verified.status, headers: { 'WWW-Authenticate': challenge } },
           ),
         );
       }
