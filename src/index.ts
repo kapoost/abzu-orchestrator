@@ -201,6 +201,34 @@ const server = Bun.serve({
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
     const url = new URL(req.url);
+    // RFC 9728 protected-resource metadata. The compliance suite's
+    // security_baseline storyboard verifies an agent's auth mechanism through
+    // one of three paths: a test-kit `auth.probe_task` (defaults to
+    // `list_creatives`, which this orchestrator does not expose — it proxies
+    // creatives through `list_creative_status`), a kit credential the agent
+    // accepts, or this document. Serving none of them left
+    // `auth_mechanism_verified: []` and failed the track. This is the honest
+    // path for us: the endpoint really is a protected resource and really does
+    // take a bearer.
+    //
+    // Unlike the seller — which is bearer-only and advertises an empty
+    // `authorization_servers` to say so — this orchestrator really does have
+    // one, and accepts RS256 JWTs from it alongside a static bearer. Naming it
+    // is therefore the accurate declaration, not a copy of the seller's shape.
+    if (
+      url.pathname === '/.well-known/oauth-protected-resource' ||
+      url.pathname === '/.well-known/oauth-protected-resource/mcp'
+    ) {
+      return withCors(
+        Response.json({
+          resource: `${env.OAUTH_AUDIENCE}/mcp`,
+          authorization_servers: [env.OAUTH_ISSUER],
+          bearer_methods_supported: ['header'],
+          resource_documentation:
+            'https://github.com/kapoost/abzu-orchestrator#authentication',
+        }),
+      );
+    }
     if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
       const verified = await verifyAuth(req.headers.get('authorization'));
       if (!verified.ok) {
