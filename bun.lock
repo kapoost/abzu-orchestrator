@@ -6,6 +6,7 @@
       "name": "@kapoost/abzu",
       "dependencies": {
         "@adcp/sdk": "13.0.2",
+        "@modelcontextprotocol/sdk": "^1.29.0",
         "jose": "5.9.6",
         "postgres": "^3.4.9",
         "yaml": "^2.9.0",

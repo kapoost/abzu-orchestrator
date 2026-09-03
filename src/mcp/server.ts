@@ -133,7 +133,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       // creative traffic to the seller that owns it (`sync_creatives_proxy`,
       // `list_creative_status`) — those are orchestrator ext tools, not the
       // AdCP creative protocol surface (`sync_creatives` / `list_creatives` /
-      // `build_creative`), and we implement none of it.
+      // `preview_creative` / `get_creative_features`), and we implement none
+      // of it. Note `build_creative` is NOT in that set: its schemas ship
+      // under `media-buy/`, not `creative/`, so dropping this declaration
+      // does not shed it.
       //
       // Advertising it pulled the full seller-side Creative Management track
       // onto a buyer: 3.1.20 grades `creative.bills_through_adcp`,
@@ -167,7 +170,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           supported_versions: ['3.1'],
           idempotency: { supported: false },
         },
-        supported_protocols: ['media_buy', 'governance'],
+        // Derived, never a second hand-maintained literal: an independent
+        // list here would let someone add a protocol to `all_protocols`
+        // (emitting its block) without declaring it, or the reverse — and
+        // the schema treats a declaration as a commitment to that
+        // protocol's baseline storyboard, so the two must not drift.
+        supported_protocols: [...all_protocols],
         ...protocolBlocks,
         ext: {
           'rocketscience.pl': orchestratorBlock,
