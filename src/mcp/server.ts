@@ -123,10 +123,27 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           persistence: 'postgres',
         },
         sellers: sellers.map((s) => ({ id: s.id, name: s.name, agent_uri: s.agent_uri, tags: s.tags })),
+        // Creative handling is pass-through: assets are validated and stored
+        // by the seller that owns the placement, never by Abzu.
+        creative_proxy_only: true,
         governance_configured: Boolean(deps.governance),
         execution_available: Boolean(deps.execution),
       };
-      const all_protocols = ['media_buy', 'creative', 'governance'] as const;
+      // `creative` is deliberately NOT an advertised protocol. Abzu proxies
+      // creative traffic to the seller that owns it (`sync_creatives_proxy`,
+      // `list_creative_status`) — those are orchestrator ext tools, not the
+      // AdCP creative protocol surface (`sync_creatives` / `list_creatives` /
+      // `build_creative`), and we implement none of it.
+      //
+      // Advertising it pulled the full seller-side Creative Management track
+      // onto a buyer: 3.1.20 grades `creative.bills_through_adcp`,
+      // `creative.supported_formats` and `creative.supports_evaluator`, all of
+      // which are declarations only a creative or sales agent can honestly
+      // make. The capability-gated scoring from adcp#7159 keys off declared
+      // specialisms, and the 3.1.20 specialism vocabulary has no buyer-side
+      // entry to declare — so the only honest lever is to stop claiming the
+      // protocol. The proxy fact still ships, under ext below.
+      const all_protocols = ['media_buy', 'governance'] as const;
       const filtered = requested ? all_protocols.filter((p) => requested.includes(p)) : all_protocols;
       const protocolBlocks: Record<string, unknown> = {};
       if (filtered.includes('media_buy')) {
@@ -137,12 +154,6 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           portfolio: {
             publisher_domains: sellers.map((s) => new URL(s.agent_uri).hostname),
           },
-        };
-      }
-      if (filtered.includes('creative')) {
-        protocolBlocks.creative = {
-          // Proxy-only — assets validate at the seller.
-          orchestrator_proxy: true,
         };
       }
       if (filtered.includes('governance')) {
@@ -156,7 +167,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           supported_versions: ['3.1'],
           idempotency: { supported: false },
         },
-        supported_protocols: ['media_buy', 'creative', 'governance'],
+        supported_protocols: ['media_buy', 'governance'],
         ...protocolBlocks,
         ext: {
           'rocketscience.pl': orchestratorBlock,
