@@ -76,14 +76,14 @@ describe('scoreProduct', () => {
 });
 
 describe('publisherKey + deduplicateScored', () => {
-  test('publisherKey concatenates sorted unique domains', () => {
+  test('publisherKey concatenates sorted unique domains and keeps product_id', () => {
     const p = makeProduct({
       publisher_properties: [
         { publisher_domain: 'b.example', selection_type: 'all' as const },
         { publisher_domains: ['a.example', 'b.example'], selection_type: 'all' as const },
       ],
     });
-    expect(publisherKey(p)).toBe('a.example,b.example');
+    expect(publisherKey(p)).toBe('a.example,b.example::p1');
   });
 
   test('publisherKey falls back to product_id when no publisher domain', () => {

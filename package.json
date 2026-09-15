@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Abzu \u2014 AdCP buyer-side orchestrator",
+  "description": "Abzu — AdCP buyer-side orchestrator",
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
@@ -13,7 +13,7 @@
     "storyboard": "bun run storyboards/cli.ts"
   },
   "dependencies": {
-    "@adcp/sdk": "13.0.2",
+    "@adcp/sdk": "13.0.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "jose": "5.9.6",
     "postgres": "^3.4.9",
