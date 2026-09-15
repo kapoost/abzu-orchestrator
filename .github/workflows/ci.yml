@@ -1,18 +1,23 @@
 name: ci
 
+# This repository's git root IS the agent (remote: kapoost/abzu-orchestrator).
+# The previous version carried a monorepo layout — `paths: agents/abzu/**`
+# plus `working-directory: agents/abzu` — that survived the split into a
+# standalone repo. Nothing here can ever match `agents/abzu/**`, since the
+# tracked paths are `src/`, `tests/`, `package.json`, so no push or PR ever
+# triggered a run; the only path that could match was this file itself, and
+# such a run failed immediately because `agents/abzu` does not resolve.
+#
+# It cost us: publisherKey gained `::product_id` in ea7ca29 and left
+# tests/scoring.test.ts failing deterministically. That red test then
+# survived a later commit editing the same file, four SDK bumps and roughly
+# four months, until it was found by hand.
+
 on:
   push:
-    paths:
-      - 'agents/abzu/**'
-      - '.github/workflows/ci.yml'
+    branches: [main]
   pull_request:
-    paths:
-      - 'agents/abzu/**'
-      - '.github/workflows/ci.yml'
-
-defaults:
-  run:
-    working-directory: agents/abzu
+    branches: [main]
 
 jobs:
   verify:
