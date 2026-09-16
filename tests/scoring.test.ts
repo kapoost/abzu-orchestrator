@@ -91,26 +91,80 @@ describe('publisherKey + deduplicateScored', () => {
     expect(publisherKey(p)).toBe('__no_publisher__::pZ');
   });
 
-  test('deduplicateScored keeps highest score per publisher key', () => {
+  test('deduplicateScored collapses the same publisher placement across sellers', () => {
+    // The case dedupe exists for. Two sellers resell one publisher placement
+    // under their OWN product ids — which is how AdCP works, product_id being
+    // seller-local. They cite the same publisher_ref {publisher_domain,
+    // placement_id}, so the buyer must see the inventory once, at the better
+    // score.
+    //
+    // The previous version of this test passed by accident: both entries used
+    // makeProduct()'s default product_id 'p1', so they collided on the
+    // seller-local id rather than on any publisher identity, and would have
+    // gone on passing while the cross-seller case it claimed to guard was
+    // broken.
     const brief = makeBrief();
     const props = [{ publisher_domain: 'x.example', selection_type: 'all' as const }];
+    const placements = [
+      { kind: 'publisher_ref' as const, placement_id: 'leaderboard', publisher_domain: 'x.example', mode: 'guaranteed' },
+    ];
+    const productA = makeProduct({ product_id: 'sellerA-leaderboard', publisher_properties: props, placements });
+    const productB = makeProduct({ product_id: 'sellerB-leaderboard', publisher_properties: props, placements });
     const scored = [
-      {
-        seller_id: 'a',
-        product: makeProduct({ publisher_properties: props }),
-        breakdown: scoreProduct(makeProduct({ publisher_properties: props }), brief),
-        score: 0.5,
-      },
-      {
-        seller_id: 'b',
-        product: makeProduct({ publisher_properties: props }),
-        breakdown: scoreProduct(makeProduct({ publisher_properties: props }), brief),
-        score: 0.9,
-      },
+      { seller_id: 'a', product: productA, breakdown: scoreProduct(productA, brief), score: 0.5 },
+      { seller_id: 'b', product: productB, breakdown: scoreProduct(productB, brief), score: 0.9 },
     ];
     const deduped = deduplicateScored(scored);
     expect(deduped).toHaveLength(1);
     expect(deduped[0]!.seller_id).toBe('b');
+  });
+
+  test('deduplicateScored keeps two placements of one publisher distinct', () => {
+    // The opposite failure, and the worse one: collapsing here would drop a
+    // publisher's second placement out of the ranking entirely. This is what
+    // ea7ca29 added product_id to the key to protect, and the publisher_ref
+    // path has to preserve it.
+    const brief = makeBrief();
+    const props = [{ publisher_domain: 'x.example', selection_type: 'all' as const }];
+    const mk = (placementId: string, productId: string) =>
+      makeProduct({
+        product_id: productId,
+        publisher_properties: props,
+        placements: [
+          { kind: 'publisher_ref' as const, placement_id: placementId, publisher_domain: 'x.example', mode: 'guaranteed' },
+        ],
+      });
+    const landing = mk('landing', 'p-landing');
+    const results = mk('results', 'p-results');
+    const scored = [
+      { seller_id: 'a', product: landing, breakdown: scoreProduct(landing, brief), score: 0.5 },
+      { seller_id: 'a', product: results, breakdown: scoreProduct(results, brief), score: 0.9 },
+    ];
+    expect(deduplicateScored(scored)).toHaveLength(2);
+  });
+
+  test('seller_inline placements do not claim cross-seller identity', () => {
+    // seller_inline placement ids are the seller's own invention, so two
+    // sellers using the same string say nothing about the inventory being
+    // the same. Falling back to the seller-local key leaves both visible:
+    // a duplicate shown is recoverable, inventory hidden is not.
+    const brief = makeBrief();
+    const props = [{ publisher_domain: 'x.example', selection_type: 'all' as const }];
+    const mk = (productId: string) =>
+      makeProduct({
+        product_id: productId,
+        publisher_properties: props,
+        placements: [
+          { kind: 'seller_inline' as const, placement_id: 'top', name: 'Top slot', mode: 'guaranteed' },
+        ],
+      });
+    const a = mk('sellerA-top');
+    const b = mk('sellerB-top');
+    const scored = [
+      { seller_id: 'a', product: a, breakdown: scoreProduct(a, brief), score: 0.5 },
+      { seller_id: 'b', product: b, breakdown: scoreProduct(b, brief), score: 0.9 },
+    ];
+    expect(deduplicateScored(scored)).toHaveLength(2);
   });
 });
 

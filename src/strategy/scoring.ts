@@ -77,15 +77,45 @@ export function publisherKey(product: Product, fallbackSellerId?: string): strin
   for (const sel of pubProps ?? []) {
     const one = (sel as { publisher_domain?: string }).publisher_domain;
     if (typeof one === 'string') domains.add(one);
+    // The compact plural form is rejected on products per core/product.json
+    // ("SDK implementers MUST enforce singular-only at runtime"), but it is
+    // read here anyway: a seller that emits it should still be deduped
+    // rather than silently treated as publisher-less.
     const many = (sel as { publisher_domains?: string[] }).publisher_domains;
     if (Array.isArray(many)) for (const d of many) domains.add(d);
   }
-  // Dedupe keys are (publisher, product) — the point of dedupe is to
-  // collapse duplicate offerings for the SAME inventory across sellers,
-  // not to collapse a single publisher's multiple placements into one
-  // proposal. Without product_id in the key, a publisher selling both a
-  // landing leaderboard and a results rectangle appears only once in the
-  // ranked output, arbitrarily losing whichever product scored lower.
+
+  // Preferred key: publisher-referenced placements. core/placement.json
+  // defines `kind: "publisher_ref"` as identifying a placement by
+  // {publisher_domain, placement_id}, with placement_id living in the
+  // PUBLISHER's namespace — so two sellers reselling the same inventory cite
+  // the same pair, and that is exactly the collapse this dedupe exists for.
+  // Different placements of one publisher carry different placement_ids and
+  // stay distinct, which is what ea7ca29 added product_id to protect.
+  const refs = new Set<string>();
+  const placements = (product as { placements?: ReadonlyArray<unknown> }).placements;
+  for (const raw of placements ?? []) {
+    const pl = raw as { kind?: string; placement_id?: string; publisher_domain?: string };
+    if (pl.kind !== 'publisher_ref' || typeof pl.placement_id !== 'string') continue;
+    // publisher_domain is required on publisher_ref; fall back to the
+    // product's own domains when a seller omits it, so a partially-populated
+    // product still keys on something publisher-scoped.
+    const domain = pl.publisher_domain ?? [...domains].sort()[0] ?? '';
+    refs.add(`${domain}#${pl.placement_id}`);
+  }
+  if (refs.size > 0) return `pubref::${[...refs].sort().join(',')}`;
+
+  // Fallback: no publisher-scoped placement identity available — either the
+  // product declares no placements, or only `seller_inline` ones, whose ids
+  // are the seller's own invention and say nothing about whether two
+  // sellers are offering the same inventory.
+  //
+  // product_id stays in the key here on purpose. It is seller-local, so it
+  // will NOT collapse the same inventory across two sellers — but claiming
+  // such a collapse from a seller-local id would be a guess, and the
+  // opposite failure (a publisher's second placement vanishing from the
+  // ranking, which is what ea7ca29 fixed) is the worse one. Under-collapsing
+  // shows the buyer a duplicate; over-collapsing hides inventory entirely.
   if (domains.size > 0) return [...domains].sort().join(',') + '::' + product.product_id;
   return fallbackSellerId
     ? `__sellerlocal__::${fallbackSellerId}::${product.product_id}`
